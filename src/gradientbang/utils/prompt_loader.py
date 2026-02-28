@@ -37,6 +37,7 @@ AVAILABLE_TOPICS = [
     "transfers",
     "ships",
     "event_logs",
+    "map_legend",
 ]
 
 

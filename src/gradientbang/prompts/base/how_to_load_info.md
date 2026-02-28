@@ -11,6 +11,7 @@ When you need in-depth rules or mechanics for a specific game system, use the `l
 - **transfers** - Warp power and credits transfers between ships
 - **ships** - Ship types, purchasing, capabilities
 - **event_logs** - Querying historical game logs, event patterns
+- **map_legend** - Map colors, icons, and what they mean on the UI
 
 Load detailed info when executing or answering questions about specific game mechanics.
 

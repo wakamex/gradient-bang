@@ -172,6 +172,7 @@ class VoiceTaskManager:
             "ship.renamed",
             "corporation.created",
             "corporation.ship_purchased",
+            "corporation.ship_sold",
             "corporation.member_joined",
             "corporation.member_left",
             "corporation.member_kicked",
@@ -1164,6 +1165,27 @@ class VoiceTaskManager:
 
         is_other_player_event = bool(player_id and player_id != self.character_id)
 
+        # Detect movement events belonging to a corp ship with an active task.
+        # These must still reach the client (RTVI push) for position updates
+        # but must NOT be appended to the local player's LLM context.
+        is_corp_ship_movement = False
+        if (
+            is_other_player_event
+            and player_id
+            and event_name
+            in {
+                "character.moved",
+                "garrison.character_moved",
+                "movement.start",
+                "movement.complete",
+            }
+        ):
+            corp_task_id = self._get_task_id_for_character(player_id)
+            if corp_task_id:
+                corp_task_info = self._active_tasks.get(corp_task_id)
+                if corp_task_info and corp_task_info.get("is_corp_ship"):
+                    is_corp_ship_movement = True
+
         # map.update is emitted server-side in Supabase move handler.
 
         # Filter out corp-visible movement events we don't want to forward
@@ -1305,7 +1327,7 @@ class VoiceTaskManager:
                     )
                 else:
                     should_append = True
-            elif is_local_sector_movement:
+            elif is_local_sector_movement and not is_corp_ship_movement:
                 should_append = True
 
         if not should_append:
@@ -1444,9 +1466,10 @@ class VoiceTaskManager:
                 f"- You're in Federation Space, a safe zone where nobody can attack\n"
                 f"- There are three mega-ports in Federation Space for warp recharge\n"
                 f"- Warp power is needed to move, so finding a mega-port is the first priority\n"
+                f"- CRITICAL: Stay in Federation Space until a mega-port is found. If you drift into non-Federation space (Neutral, etc.), allow 2-3 hops to look for a route back, then reverse. Do NOT explore deeper — the player will strand.\n"
                 f"- Ask: should we search for a mega-port now?\n"
                 f"- Ask: do you want to trade along the way, or just focus on finding the mega-port?\n"
-                f"Converse naturally with the player. When they want to search for the mega-port, start a task to find it. Note in the task instructions whether to trade or not. "
+                f"Converse naturally with the player. When they want to search for the mega-port, start a task to find it. Include the Federation Space constraint in any task instructions."
                 "</event>"
             )
             logger.info("Onboarding: new player, injecting welcome message")
