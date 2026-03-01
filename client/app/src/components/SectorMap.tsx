@@ -185,6 +185,9 @@ const MapComponent = ({
   const [measuredSize, setMeasuredSize] = useState<{
     width: number
     height: number
+    /** Exact physical pixel dimensions from devicePixelContentBoxSize (Chrome/Edge 84+). */
+    physicalWidth?: number
+    physicalHeight?: number
   } | null>(null)
 
   const isAutoSizing = width === undefined && height === undefined
@@ -202,6 +205,10 @@ const MapComponent = ({
     () => height ?? (hasValidMeasurement ? measuredSize.height : 440),
     [height, hasValidMeasurement, measuredSize]
   )
+
+  // Exact physical pixel dimensions (when available from devicePixelContentBoxSize)
+  const physicalWidth = hasValidMeasurement ? measuredSize.physicalWidth : undefined
+  const physicalHeight = hasValidMeasurement ? measuredSize.physicalHeight : undefined
 
   const lastDimensionsRef = useRef<{ width: number; height: number }>({
     width: effectiveWidth,
@@ -244,18 +251,37 @@ const MapComponent = ({
         const entry = entries[0]
         if (entry) {
           const { width: measuredWidth, height: measuredHeight } = entry.contentRect
+
+          // Use exact physical pixel dimensions when available (Chrome/Edge 84+)
+          // to avoid rounding errors on fractional DPR displays (e.g. 1.25x, 1.5x)
+          const dpSize = entry.devicePixelContentBoxSize?.[0]
+          const physicalWidth = dpSize?.inlineSize
+          const physicalHeight = dpSize?.blockSize
+
           if (measuredWidth > 0 && measuredHeight > 0) {
             console.debug("[GAME SECTOR MAP] Resizing", {
               width: measuredWidth,
               height: measuredHeight,
+              ...(physicalWidth && { physicalWidth, physicalHeight }),
             })
-            setMeasuredSize({ width: measuredWidth, height: measuredHeight })
+            setMeasuredSize({
+              width: measuredWidth,
+              height: measuredHeight,
+              physicalWidth,
+              physicalHeight,
+            })
           }
         }
       }, RESIZE_DELAY)
     })
 
-    observer.observe(containerRef.current)
+    // Request device-pixel-content-box observation for exact physical pixels.
+    // Falls back gracefully — browsers that don't support it still fire with contentRect.
+    try {
+      observer.observe(containerRef.current, { box: "device-pixel-content-box" })
+    } catch {
+      observer.observe(containerRef.current)
+    }
 
     return () => {
       if (timeoutId !== null) {
@@ -283,6 +309,8 @@ const MapComponent = ({
       controller.updateProps({
         width: effectiveWidth,
         height: effectiveHeight,
+        physicalWidth,
+        physicalHeight,
       })
       controller.render()
 
@@ -291,7 +319,7 @@ const MapComponent = ({
         height: effectiveHeight,
       }
     }
-  }, [effectiveWidth, effectiveHeight])
+  }, [effectiveWidth, effectiveHeight, physicalWidth, physicalHeight])
 
   // Main controller update effect
   useEffect(() => {
@@ -311,6 +339,8 @@ const MapComponent = ({
       controller = createSectorMapController(canvas, {
         width: lastDimensionsRef.current.width,
         height: lastDimensionsRef.current.height,
+        physicalWidth,
+        physicalHeight,
         data: normalizedMapData,
         config: {
           ...baseConfig,
@@ -394,10 +424,7 @@ const MapComponent = ({
 
     // Determine if a camera reframe is needed
     const reframeRequested =
-      centerSectorChanged ||
-      centerWorldChanged ||
-      fitBoundsWorldChanged ||
-      mapFitEpochChanged
+      centerSectorChanged || centerWorldChanged || fitBoundsWorldChanged || mapFitEpochChanged
 
     // maxDistance-only change (e.g. from scroll-zoom syncing to store):
     // just re-render without moveToSector to avoid resetting manual zoom
@@ -423,7 +450,13 @@ const MapComponent = ({
       controller.moveToSector(center_sector_id, normalizedMapData)
 
       prevCenterSectorIdRef.current = center_sector_id
-    } else if (maxDistanceOnly || needsConfigUpdate || shipsChanged || coursePlotChanged || topologyChanged) {
+    } else if (
+      maxDistanceOnly ||
+      needsConfigUpdate ||
+      shipsChanged ||
+      coursePlotChanged ||
+      topologyChanged
+    ) {
       console.debug("%c[SectorMap] Re-render", "color: red; font-weight: bold", {
         configChanged,
         shipsChanged,
