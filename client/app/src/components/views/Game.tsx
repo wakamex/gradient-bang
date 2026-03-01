@@ -68,11 +68,12 @@ export const Game = () => {
   }, [uiState, setLookMode])
 
   useEffect(() => {
-    const unsub = useGameStore.subscribe((state, prevState) => {
-      if (state.uiMode !== prevState.uiMode) {
+    const unsub = useGameStore.subscribe(
+      (state) => state.uiMode,
+      () => {
         useAudioStore.getState().playSound("chime4")
       }
-    })
+    )
     return unsub
   }, [])
 

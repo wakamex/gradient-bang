@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client"
 import { PipecatClient } from "@pipecat-ai/client-js"
 import { PipecatClientProvider } from "@pipecat-ai/client-react"
 
-import { FullScreenLoader } from "@/components/FullScreenLoader"
+import { SuspenseLoader } from "@/components/SuspenseLoader"
 import { Error } from "@/components/views/Error"
 import { ViewContainer } from "@/components/views/ViewContainer"
 import { AnimatedFrame } from "@/fx/frame"
@@ -12,9 +12,9 @@ import { GameProvider } from "@/GameContext"
 import usePipecatClientStore from "@/stores/client"
 import useGameStore from "@/stores/game"
 
-import "./css/index.css"
+import { swReady } from "./sw-update"
 
-import "./sw-update"
+import "./css/index.css"
 
 const isFirefox = /firefox/i.test(navigator.userAgent)
 
@@ -37,18 +37,15 @@ document.addEventListener(
   { passive: false }
 )
 
-// Get settings from the initialized store (not from JSON directly)
-const Settings = useGameStore.getState().settings
-
 // Parse query string parameters
 const queryParams = new URLSearchParams(window.location.search)
 const transport =
   queryParams.get("transport") || import.meta.env.VITE_PIPECAT_TRANSPORT || "smallwebrtc"
 
 const endpoint =
-  (queryParams.get("server") || Settings.bypassTitle ?
-    import.meta.env.VITE_BOT_URL || "http://localhost:7860"
-  : import.meta.env.VITE_SERVER_URL || "http://localhost:54321/functions/v1") + "/start"
+  (queryParams.get("server") ||
+    import.meta.env.VITE_SERVER_URL ||
+    "http://localhost:54321/functions/v1") + "/start"
 
 useGameStore.getState().setBotConfig(
   {
@@ -58,8 +55,8 @@ useGameStore.getState().setBotConfig(
 )
 
 console.debug(
-  "Gradient Bang Version " + import.meta.env.VITE_APP_VERSION,
-  "color: black; font-weight: bold"
+  "%cGradient Bang Version " + import.meta.env.VITE_APP_VERSION,
+  "background: #90EE90; color: #006400; font-weight: bold"
 )
 console.debug(
   "%c[GAME INIT] Pipecat Configuration",
@@ -84,7 +81,9 @@ const App = lazy(async () => {
         return new DailyTransport()
       }
 
-  const transportInstance = await createTransport()
+  // Wait for SW update check and transport creation in parallel.
+  // FullScreenLoader stays visible until both complete.
+  const [, transportInstance] = await Promise.all([swReady, createTransport()])
 
   const AppComponent = () => {
     const client = usePipecatClientStore((state) => state.client)
@@ -148,7 +147,7 @@ createRoot(document.getElementById("root")!).render(
         Safari on macOS. Please switch to a supported browser for the best experience.
       </Error>
     : <>
-        <Suspense fallback={<FullScreenLoader />}>
+        <Suspense fallback={<SuspenseLoader />}>
           <App />
         </Suspense>
 

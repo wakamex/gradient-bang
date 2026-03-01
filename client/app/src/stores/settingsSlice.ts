@@ -21,8 +21,6 @@ export interface SettingsSlice {
     startMuted: boolean
     qualityPreset: PerformanceProfile
     saveSettings: boolean
-    bypassAssetCache: boolean
-    bypassTitle: boolean
     defaultUIMode: UIMode
   }
   setSettings: (settings: SettingsSlice["settings"]) => void
@@ -50,8 +48,6 @@ const defaultSettings = {
   startMuted: false,
   qualityPreset: "auto",
   saveSettings: true,
-  bypassAssetCache: false,
-  bypassTitle: false,
   defaultUIMode: "tasks",
 }
 

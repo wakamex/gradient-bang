@@ -4,8 +4,8 @@ import type { StateCreator } from "zustand"
 
 import { getLocalSettings, updateLocalSettings } from "@/utils/settings"
 
-import type { Toast, ToastInput } from "@/types/toasts"
 import { UI_PANELS } from "@/types/constants"
+import type { Toast, ToastInput } from "@/types/toasts"
 
 interface Notifications {
   newChatMessage: boolean

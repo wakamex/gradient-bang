@@ -3,7 +3,5 @@
     "enableMic": true,
     "disableRemoteAudio": false,
     "saveSettings": true,
-    "bypassAssetCache": false,
-    "bypassTitle": false,
     "useDevTools": false
 }

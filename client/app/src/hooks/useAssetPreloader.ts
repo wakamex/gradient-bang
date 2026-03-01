@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react"
 
 import { chunks, images, skyboxImages, sounds, videos } from "@/assets"
+import { markAssetsCached } from "@/utils/cache"
 
 export type AssetType = "chunk" | "image" | "video" | "sound"
 
@@ -234,6 +235,7 @@ export const useAssetPreloader = () => {
 
       // Mark as complete
       _g.__gb_assetsPreloaded = true
+      markAssetsCached()
       console.debug("[PRELOAD] All assets preloaded successfully")
     } catch (error) {
       console.error("[PRELOAD] Fatal error during preload:", error)

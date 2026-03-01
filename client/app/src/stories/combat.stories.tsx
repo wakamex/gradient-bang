@@ -3,12 +3,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { Story } from "@ladle/react"
 
 import { CombatActionPanel } from "@/components/panels/CombatActionPanel"
+import useGameStore from "@/stores/game"
+
 import {
   COMBAT_COLLECT_STATUS_UPDATE_PAYLOAD_MOCK,
   COMBAT_ROUND_WAITING_PAYLOAD_MOCK,
   COMBAT_SECTOR_UPDATE_FULL_PAYLOAD_MOCK,
 } from "@/mocks/combat.mock"
-import useGameStore from "@/stores/game"
 
 const DEFAULT_ROUND_DURATION_SECONDS = 15
 
@@ -150,10 +151,8 @@ export const CombatFlowStory: Story = () => {
   const setPlayer = useGameStore((state) => state.setPlayer)
   const setShip = useGameStore((state) => state.setShip)
   const setSector = useGameStore((state) => state.setSector)
-  const [roundDurationSeconds, setRoundDurationSeconds] = useState(
-    DEFAULT_ROUND_DURATION_SECONDS
-  )
-  const [tickNow, setTickNow] = useState(Date.now())
+  const [roundDurationSeconds, setRoundDurationSeconds] = useState(DEFAULT_ROUND_DURATION_SECONDS)
+  const [tickNow, setTickNow] = useState(() => Date.now())
   const timeoutHandledRef = useRef<string | null>(null)
 
   useEffect(() => {
@@ -165,17 +164,14 @@ export const CombatFlowStory: Story = () => {
   }, [resetCombatState, setPlayer, setSector, setShip, setUIState])
 
   const latestRound =
-    combatRounds.length > 0 ? combatRounds[combatRounds.length - 1]
-    : (lastCombatEnded ?? null)
+    combatRounds.length > 0 ? combatRounds[combatRounds.length - 1] : (lastCombatEnded ?? null)
   const participants =
     activeCombatSession?.participants ??
     latestRound?.participants ??
-    (lastCombatEnded?.participants ?? [])
+    lastCombatEnded?.participants ??
+    []
   const currentCombatId =
-    activeCombatSession?.combat_id ??
-    lastCombatEnded?.combat_id ??
-    latestRound?.combat_id ??
-    null
+    activeCombatSession?.combat_id ?? lastCombatEnded?.combat_id ?? latestRound?.combat_id ?? null
   const timelineRounds = useMemo(() => {
     if (!currentCombatId) return []
 
@@ -195,7 +191,9 @@ export const CombatFlowStory: Story = () => {
   const combatActivity = useMemo(
     () =>
       activityLog
-        .filter((entry) => COMBAT_ACTIVITY_TYPES.has(entry.type) || entry.type.startsWith("combat."))
+        .filter(
+          (entry) => COMBAT_ACTIVITY_TYPES.has(entry.type) || entry.type.startsWith("combat.")
+        )
         .slice(-100),
     [activityLog]
   )
@@ -233,13 +231,12 @@ export const CombatFlowStory: Story = () => {
     if (!session) return
 
     const playerId =
-      state.player?.id ??
-      session.participants.find((participant) => participant.id)?.id ??
-      "player"
+      state.player?.id ?? session.participants.find((participant) => participant.id)?.id ?? "player"
     const primaryTargetId =
-      session.participants.find((participant) => participant.id && participant.id !== playerId)?.id ??
-      null
-    const commitBase = action === "attack" ? Math.max(10, Math.floor((state.ship?.fighters ?? 60) / 2)) : 0
+      session.participants.find((participant) => participant.id && participant.id !== playerId)
+        ?.id ?? null
+    const commitBase =
+      action === "attack" ? Math.max(10, Math.floor((state.ship?.fighters ?? 60) / 2)) : 0
     const roundReceiptCount = state.combatActionReceipts.filter(
       (receipt) => receipt.combat_id === session.combat_id && receipt.round === session.round
     ).length
@@ -258,203 +255,209 @@ export const CombatFlowStory: Story = () => {
     })
   }, [])
 
-  const resolveMockRound = useCallback((timedOut = false) => {
-    const state = useGameStore.getState()
-    const session = state.activeCombatSession
-    if (!session) return
+  const resolveMockRound = useCallback(
+    (timedOut = false) => {
+      const state = useGameStore.getState()
+      const session = state.activeCombatSession
+      if (!session) return
 
-    const playerId = state.player?.id ?? session.participants.find((participant) => participant.id)?.id
-    const playerName =
-      state.player?.name ??
-      session.participants.find((participant) => participant.id === playerId)?.name ??
-      "Player"
-    const opponent = session.participants.find(
-      (participant) => participant.id && participant.id !== playerId
-    )
-    const lastReceipt = [...state.combatActionReceipts]
-      .reverse()
-      .find((receipt) => receipt.combat_id === session.combat_id && receipt.round === session.round)
-    const chosenAction: CombatActionType = lastReceipt?.action ?? "brace"
-    const profile = roundProfileForAction(chosenAction)
-    const previousRound = [...state.combatRounds]
-      .reverse()
-      .find((round) => round.combat_id === session.combat_id)
-
-    const participantIds = session.participants
-      .map((participant) => participant.id)
-      .filter((id): id is string => Boolean(id))
-    const ids = [...participantIds]
-    if (playerId && !ids.includes(playerId)) ids.push(playerId)
-    if (opponent?.id && !ids.includes(opponent.id)) ids.push(opponent.id)
-
-    const hits: Record<string, number> = {}
-    const offensive_losses: Record<string, number> = {}
-    const defensive_losses: Record<string, number> = {}
-    const shield_loss: Record<string, number> = {}
-    const damage_mitigated: Record<string, number> = {}
-    const fighters_remaining: Record<string, number> = {}
-    const shields_remaining: Record<string, number> = {}
-    const flee_results: Record<string, boolean> = {}
-
-    for (const id of ids) {
-      const prevFighters = previousRound?.fighters_remaining[id] ?? 100
-      const prevShields = previousRound?.shields_remaining[id] ?? 100
-      hits[id] = 0
-      offensive_losses[id] = 0
-      defensive_losses[id] = 0
-      shield_loss[id] = 0
-      damage_mitigated[id] = 0
-      fighters_remaining[id] = prevFighters
-      shields_remaining[id] = prevShields
-      flee_results[id] = false
-    }
-
-    if (playerId) {
-      hits[playerId] = profile.myHits
-      offensive_losses[playerId] = profile.myOffLosses
-      defensive_losses[playerId] = profile.myDefLosses
-      shield_loss[playerId] = profile.myShieldLoss
-      damage_mitigated[playerId] = Math.max(0, Math.floor(profile.enemyHits * 0.2))
-      fighters_remaining[playerId] = Math.max(
-        0,
-        (fighters_remaining[playerId] ?? 100) - profile.myOffLosses - profile.myDefLosses
+      const playerId =
+        state.player?.id ?? session.participants.find((participant) => participant.id)?.id
+      const playerName =
+        state.player?.name ??
+        session.participants.find((participant) => participant.id === playerId)?.name ??
+        "Player"
+      const opponent = session.participants.find(
+        (participant) => participant.id && participant.id !== playerId
       )
-      shields_remaining[playerId] = Math.max(
-        0,
-        (shields_remaining[playerId] ?? 100) - profile.myShieldLoss
-      )
-      flee_results[playerId] = chosenAction === "flee"
-    }
+      const lastReceipt = [...state.combatActionReceipts]
+        .reverse()
+        .find(
+          (receipt) => receipt.combat_id === session.combat_id && receipt.round === session.round
+        )
+      const chosenAction: CombatActionType = lastReceipt?.action ?? "brace"
+      const profile = roundProfileForAction(chosenAction)
+      const previousRound = [...state.combatRounds]
+        .reverse()
+        .find((round) => round.combat_id === session.combat_id)
 
-    if (opponent?.id) {
-      hits[opponent.id] = profile.enemyHits
-      offensive_losses[opponent.id] = Math.max(1, Math.floor(profile.enemyHits / 2))
-      defensive_losses[opponent.id] = Math.max(1, profile.myHits)
-      shield_loss[opponent.id] = Math.max(0, Math.floor(profile.myHits / 2))
-      damage_mitigated[opponent.id] = Math.max(0, Math.floor(profile.myHits * 0.1))
-      fighters_remaining[opponent.id] = Math.max(
-        0,
-        (fighters_remaining[opponent.id] ?? 100) -
-          offensive_losses[opponent.id] -
-          defensive_losses[opponent.id]
-      )
-      shields_remaining[opponent.id] = Math.max(
-        0,
-        (shields_remaining[opponent.id] ?? 100) - shield_loss[opponent.id]
-      )
-    }
+      const participantIds = session.participants
+        .map((participant) => participant.id)
+        .filter((id): id is string => Boolean(id))
+      const ids = [...participantIds]
+      if (playerId && !ids.includes(playerId)) ids.push(playerId)
+      if (opponent?.id && !ids.includes(opponent.id)) ids.push(opponent.id)
 
-    let endResult: string | null = null
-    if (chosenAction === "flee") {
-      endResult = `${playerName}_fled`
-    } else if (chosenAction === "pay" && session.garrison?.mode === "toll") {
-      endResult = "toll_satisfied"
-    } else if (session.round >= 3) {
-      endResult = "victory"
-    }
+      const hits: Record<string, number> = {}
+      const offensive_losses: Record<string, number> = {}
+      const defensive_losses: Record<string, number> = {}
+      const shield_loss: Record<string, number> = {}
+      const damage_mitigated: Record<string, number> = {}
+      const fighters_remaining: Record<string, number> = {}
+      const shields_remaining: Record<string, number> = {}
+      const flee_results: Record<string, boolean> = {}
 
-    const resolvedActions: Record<string, CombatAction> = {}
-    resolvedActions[playerName] = {
-      action: chosenAction,
-      commit: lastReceipt?.commit ?? 0,
-      timed_out: timedOut,
-      submitted_at: new Date().toISOString(),
-      target: lastReceipt?.target_id ?? null,
-      target_id: lastReceipt?.target_id ?? null,
-      destination_sector: chosenAction === "flee" ? session.sector.id + 1 : null,
-    }
-    if (opponent) {
-      resolvedActions[opponent.name] = {
-        action: "attack",
-        commit: 20,
-        timed_out: false,
+      for (const id of ids) {
+        const prevFighters = previousRound?.fighters_remaining[id] ?? 100
+        const prevShields = previousRound?.shields_remaining[id] ?? 100
+        hits[id] = 0
+        offensive_losses[id] = 0
+        defensive_losses[id] = 0
+        shield_loss[id] = 0
+        damage_mitigated[id] = 0
+        fighters_remaining[id] = prevFighters
+        shields_remaining[id] = prevShields
+        flee_results[id] = false
+      }
+
+      if (playerId) {
+        hits[playerId] = profile.myHits
+        offensive_losses[playerId] = profile.myOffLosses
+        defensive_losses[playerId] = profile.myDefLosses
+        shield_loss[playerId] = profile.myShieldLoss
+        damage_mitigated[playerId] = Math.max(0, Math.floor(profile.enemyHits * 0.2))
+        fighters_remaining[playerId] = Math.max(
+          0,
+          (fighters_remaining[playerId] ?? 100) - profile.myOffLosses - profile.myDefLosses
+        )
+        shields_remaining[playerId] = Math.max(
+          0,
+          (shields_remaining[playerId] ?? 100) - profile.myShieldLoss
+        )
+        flee_results[playerId] = chosenAction === "flee"
+      }
+
+      if (opponent?.id) {
+        hits[opponent.id] = profile.enemyHits
+        offensive_losses[opponent.id] = Math.max(1, Math.floor(profile.enemyHits / 2))
+        defensive_losses[opponent.id] = Math.max(1, profile.myHits)
+        shield_loss[opponent.id] = Math.max(0, Math.floor(profile.myHits / 2))
+        damage_mitigated[opponent.id] = Math.max(0, Math.floor(profile.myHits * 0.1))
+        fighters_remaining[opponent.id] = Math.max(
+          0,
+          (fighters_remaining[opponent.id] ?? 100) -
+            offensive_losses[opponent.id] -
+            defensive_losses[opponent.id]
+        )
+        shields_remaining[opponent.id] = Math.max(
+          0,
+          (shields_remaining[opponent.id] ?? 100) - shield_loss[opponent.id]
+        )
+      }
+
+      let endResult: string | null = null
+      if (chosenAction === "flee") {
+        endResult = `${playerName}_fled`
+      } else if (chosenAction === "pay" && session.garrison?.mode === "toll") {
+        endResult = "toll_satisfied"
+      } else if (session.round >= 3) {
+        endResult = "victory"
+      }
+
+      const resolvedActions: Record<string, CombatAction> = {}
+      resolvedActions[playerName] = {
+        action: chosenAction,
+        commit: lastReceipt?.commit ?? 0,
+        timed_out: timedOut,
         submitted_at: new Date().toISOString(),
-        target: playerId ?? null,
-        target_id: playerId ?? null,
-        destination_sector: null,
+        target: lastReceipt?.target_id ?? null,
+        target_id: lastReceipt?.target_id ?? null,
+        destination_sector: chosenAction === "flee" ? session.sector.id + 1 : null,
       }
-    }
-
-    const resolvedRound: CombatRound = {
-      combat_id: session.combat_id,
-      sector: { id: session.sector.id },
-      round: session.round,
-      hits,
-      offensive_losses,
-      defensive_losses,
-      shield_loss,
-      damage_mitigated,
-      fighters_remaining,
-      shields_remaining,
-      flee_results,
-      actions: resolvedActions,
-      participants: session.participants,
-      garrison: session.garrison ?? null,
-      deadline: session.deadline,
-      end: endResult,
-      result: endResult,
-      round_result: endResult,
-    }
-
-    state.addCombatRound(resolvedRound)
-    state.addActivityLogEntry({
-      type: "combat.round.resolved",
-      message: `Mock round ${session.round} resolved (${timedOut ? "timeout" : chosenAction})`,
-    })
-
-    if (endResult) {
-      const endedRound: CombatEndedRound = {
-        ...resolvedRound,
-        salvage: [],
-        logs: [
-          {
-            round_number: resolvedRound.round,
-            actions: resolvedActions,
-            hits,
-            offensive_losses,
-            defensive_losses,
-            shield_loss,
-            damage_mitigated,
-            result: endResult,
-            timestamp: new Date().toISOString(),
-          },
-        ],
+      if (opponent) {
+        resolvedActions[opponent.name] = {
+          action: "attack",
+          commit: 20,
+          timed_out: false,
+          submitted_at: new Date().toISOString(),
+          target: playerId ?? null,
+          target_id: playerId ?? null,
+          destination_sector: null,
+        }
       }
 
-      state.addCombatHistory(endedRound)
-      state.setLastCombatEnded(endedRound)
-      state.endActiveCombatSession()
-      state.setUIState("idle")
+      const resolvedRound: CombatRound = {
+        combat_id: session.combat_id,
+        sector: { id: session.sector.id },
+        round: session.round,
+        hits,
+        offensive_losses,
+        defensive_losses,
+        shield_loss,
+        damage_mitigated,
+        fighters_remaining,
+        shields_remaining,
+        flee_results,
+        actions: resolvedActions,
+        participants: session.participants,
+        garrison: session.garrison ?? null,
+        deadline: session.deadline,
+        end: endResult,
+        result: endResult,
+        round_result: endResult,
+      }
+
+      state.addCombatRound(resolvedRound)
       state.addActivityLogEntry({
-        type: "combat.session.ended",
-        message: `Mock combat ended with result [${endResult}]`,
+        type: "combat.round.resolved",
+        message: `Mock round ${session.round} resolved (${timedOut ? "timeout" : chosenAction})`,
       })
-      return
-    }
 
-    const updatedParticipants = session.participants.map((participant) => {
-      const participantId = participant.id
-      if (!participantId) return participant
-      const nextFighters = defensive_losses[participantId] ?? participant.ship.fighter_loss ?? 0
-      const nextShieldLoss = shield_loss[participantId] ?? participant.ship.shield_damage ?? 0
-      return {
-        ...participant,
-        ship: {
-          ...participant.ship,
-          fighter_loss: nextFighters,
-          shield_damage: nextShieldLoss,
-        },
+      if (endResult) {
+        const endedRound: CombatEndedRound = {
+          ...resolvedRound,
+          salvage: [],
+          logs: [
+            {
+              round_number: resolvedRound.round,
+              actions: resolvedActions,
+              hits,
+              offensive_losses,
+              defensive_losses,
+              shield_loss,
+              damage_mitigated,
+              result: endResult,
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        }
+
+        state.addCombatHistory(endedRound)
+        state.setLastCombatEnded(endedRound)
+        state.endActiveCombatSession()
+        state.setUIState("idle")
+        state.addActivityLogEntry({
+          type: "combat.session.ended",
+          message: `Mock combat ended with result [${endResult}]`,
+        })
+        return
       }
-    })
 
-    state.updateActiveCombatSession({
-      round: session.round + 1,
-      current_time: new Date().toISOString(),
-      deadline: buildDeadlineIso(roundDurationSeconds),
-      participants: updatedParticipants,
-      garrison: session.garrison ?? null,
-    })
-  }, [roundDurationSeconds])
+      const updatedParticipants = session.participants.map((participant) => {
+        const participantId = participant.id
+        if (!participantId) return participant
+        const nextFighters = defensive_losses[participantId] ?? participant.ship.fighter_loss ?? 0
+        const nextShieldLoss = shield_loss[participantId] ?? participant.ship.shield_damage ?? 0
+        return {
+          ...participant,
+          ship: {
+            ...participant.ship,
+            fighter_loss: nextFighters,
+            shield_damage: nextShieldLoss,
+          },
+        }
+      })
+
+      state.updateActiveCombatSession({
+        round: session.round + 1,
+        current_time: new Date().toISOString(),
+        deadline: buildDeadlineIso(roundDurationSeconds),
+        participants: updatedParticipants,
+        garrison: session.garrison ?? null,
+      })
+    },
+    [roundDurationSeconds]
+  )
 
   const resetMockCombat = useCallback(() => {
     const state = useGameStore.getState()
@@ -524,7 +527,10 @@ export const CombatFlowStory: Story = () => {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
           <Stat label="Combat ID" value={activeCombatSession?.combat_id ?? "none"} />
           <Stat label="Current Round" value={activeCombatSession?.round ?? "-"} />
-          <Stat label="Round Timer" value={activeCombatSession ? `${remainingSeconds}s` : "inactive"} />
+          <Stat
+            label="Round Timer"
+            value={activeCombatSession ? `${remainingSeconds}s` : "inactive"}
+          />
           <Stat label="Deadline" value={activeCombatSession?.deadline ?? "n/a"} />
         </div>
 
@@ -541,7 +547,10 @@ export const CombatFlowStory: Story = () => {
         </div>
 
         <div className="mb-3 flex items-center gap-2 text-xs">
-          <label htmlFor="roundDuration" className="text-subtle-foreground uppercase tracking-wider">
+          <label
+            htmlFor="roundDuration"
+            className="text-subtle-foreground uppercase tracking-wider"
+          >
             Round Duration (s)
           </label>
           <input
@@ -652,7 +661,9 @@ export const CombatFlowStory: Story = () => {
                     <div className="mb-2 text-xs text-subtle-foreground">
                       <span className="text-foreground font-medium">Round {round.round}</span>
                       {" | "}result:{" "}
-                      <span className="text-foreground">{round.round_result ?? round.result ?? "none"}</span>
+                      <span className="text-foreground">
+                        {round.round_result ?? round.result ?? "none"}
+                      </span>
                     </div>
 
                     <div className="mb-2">
@@ -660,12 +671,15 @@ export const CombatFlowStory: Story = () => {
                         Who Did What
                       </div>
                       {actionRows.length === 0 && (
-                        <div className="text-xs text-subtle-foreground">No explicit actions recorded.</div>
+                        <div className="text-xs text-subtle-foreground">
+                          No explicit actions recorded.
+                        </div>
                       )}
                       <div className="space-y-1">
                         {actionRows.map(([actor, action]) => (
                           <div key={`${round.round}:action:${actor}`} className="text-xs">
-                            <span className="text-foreground font-medium">{actor}</span>: {action.action}
+                            <span className="text-foreground font-medium">{actor}</span>:{" "}
+                            {action.action}
                             {" | "}commit {action.commit}
                             {" | "}target {action.target ?? action.target_id ?? "none"}
                             {" | "}timeout {action.timed_out ? "yes" : "no"}
@@ -695,21 +709,37 @@ export const CombatFlowStory: Story = () => {
                           <tbody>
                             {metricKeys.map((key) => {
                               const participantName =
-                                round.participants.find((participant) => participant.id === key)?.name ??
-                                (key.startsWith("garrison:") ? (round.garrison?.owner_name ?? key) : key)
+                                round.participants.find((participant) => participant.id === key)
+                                  ?.name ??
+                                (key.startsWith("garrison:") ?
+                                  (round.garrison?.owner_name ?? key)
+                                : key)
 
                               return (
-                                <tr key={`${round.round}:metric:${key}`} className="border-t border-border/30">
+                                <tr
+                                  key={`${round.round}:metric:${key}`}
+                                  className="border-t border-border/30"
+                                >
                                   <td className="pr-2 py-1 text-foreground">{participantName}</td>
                                   <td className="pr-2 py-1">{round.hits?.[key] ?? "-"}</td>
-                                  <td className="pr-2 py-1">{round.offensive_losses?.[key] ?? "-"}</td>
-                                  <td className="pr-2 py-1">{round.defensive_losses?.[key] ?? "-"}</td>
+                                  <td className="pr-2 py-1">
+                                    {round.offensive_losses?.[key] ?? "-"}
+                                  </td>
+                                  <td className="pr-2 py-1">
+                                    {round.defensive_losses?.[key] ?? "-"}
+                                  </td>
                                   <td className="pr-2 py-1">{round.shield_loss?.[key] ?? "-"}</td>
-                                  <td className="pr-2 py-1">{round.fighters_remaining?.[key] ?? "-"}</td>
-                                  <td className="pr-2 py-1">{round.shields_remaining?.[key] ?? "-"}</td>
+                                  <td className="pr-2 py-1">
+                                    {round.fighters_remaining?.[key] ?? "-"}
+                                  </td>
+                                  <td className="pr-2 py-1">
+                                    {round.shields_remaining?.[key] ?? "-"}
+                                  </td>
                                   <td className="py-1">
                                     {typeof round.flee_results?.[key] === "boolean" ?
-                                      (round.flee_results[key] ? "yes" : "no")
+                                      round.flee_results[key] ?
+                                        "yes"
+                                      : "no"
                                     : "-"}
                                   </td>
                                 </tr>
@@ -730,13 +760,14 @@ export const CombatFlowStory: Story = () => {
               Combat Activity Feed
             </h4>
             {combatActivity.length === 0 && (
-              <div className="text-xs text-subtle-foreground">
-                No combat activity yet.
-              </div>
+              <div className="text-xs text-subtle-foreground">No combat activity yet.</div>
             )}
             <div className="space-y-1 max-h-[380px] overflow-auto pr-1">
               {combatActivity.map((entry, index) => (
-                <div key={`${entry.type}:${entry.timestamp ?? index}:${index}`} className="rounded-sm border border-border/30 bg-card/30 px-2 py-1">
+                <div
+                  key={`${entry.type}:${entry.timestamp ?? index}:${index}`}
+                  className="rounded-sm border border-border/30 bg-card/30 px-2 py-1"
+                >
                   <div className="text-[10px] uppercase tracking-wider text-subtle-foreground">
                     {entry.type}
                     {entry.timestamp && (
@@ -758,7 +789,8 @@ export const CombatFlowStory: Story = () => {
         <div className="mb-3">
           <h3 className="text-sm font-semibold leading-tight">My Ship</h3>
           <div className="text-xs text-subtle-foreground">
-            {player?.name ?? "Unknown"} | {ship?.ship_name ?? "Unknown Ship"} ({ship?.ship_type ?? "unknown"})
+            {player?.name ?? "Unknown"} | {ship?.ship_name ?? "Unknown Ship"} (
+            {ship?.ship_type ?? "unknown"})
           </div>
         </div>
 

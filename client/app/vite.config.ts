@@ -18,13 +18,57 @@ export default defineConfig(() => ({
     react(),
     tailwindcss(),
     VitePWA({
-      registerType: "autoUpdate",
+      registerType: "prompt",
       devOptions: {
         enabled: false,
       },
       workbox: {
-        globPatterns: ["**/*.{js,css,html,png,jpg,jpeg,svg,woff,woff2,wav,mp3,mp4}"],
+        // Precache only CSS, HTML, fonts (~50KB). Near-instant install/update.
+        // JS and media are runtime-cached when fetched (by page load or preload screen).
+        globPatterns: ["**/*.{css,woff,woff2}"],
         maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
+        clientsClaim: true,
+        // Don't serve index.html from precache for navigations.
+        // This ensures a normal refresh always fetches fresh HTML from the network,
+        // so new deploys are picked up without needing a hard refresh.
+        navigateFallbackDenylist: [/./],
+        // Runtime caching: assets cached on first fetch via CacheFirst.
+        // Vite adds content hashes to filenames, so CacheFirst is safe —
+        // URL changes when content changes. maxEntries evicts old hashed URLs.
+        runtimeCaching: [
+          {
+            urlPattern: /\.js$/i,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "gb-js",
+              expiration: { maxEntries: 50, maxAgeSeconds: 30 * 24 * 60 * 60 },
+            },
+          },
+          {
+            urlPattern: /\.(?:png|jpg|jpeg|svg)$/i,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "gb-images",
+              expiration: { maxEntries: 100, maxAgeSeconds: 30 * 24 * 60 * 60 },
+            },
+          },
+          {
+            urlPattern: /\.(?:wav|mp3)$/i,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "gb-audio",
+              expiration: { maxEntries: 50, maxAgeSeconds: 30 * 24 * 60 * 60 },
+            },
+          },
+          {
+            urlPattern: /\.(?:mp4)$/i,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "gb-video",
+              expiration: { maxEntries: 10, maxAgeSeconds: 30 * 24 * 60 * 60 },
+            },
+          },
+        ],
       },
       manifest: {
         name: "Gradient Bang",

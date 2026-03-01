@@ -3,8 +3,8 @@ import { useMemo, useRef } from "react"
 import { RTVIEvent } from "@pipecat-ai/client-js"
 import { useRTVIClientEvent } from "@pipecat-ai/client-react"
 
-import { filterEmptyMessages, mergeMessages, sortByCreatedAt } from "@/stores/chatSlice"
 import useAudioStore from "@/stores/audio"
+import { filterEmptyMessages, mergeMessages, sortByCreatedAt } from "@/stores/chatSlice"
 import useGameStore from "@/stores/game"
 
 export type TextMode = "llm" | "tts"
