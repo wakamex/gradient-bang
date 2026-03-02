@@ -123,4 +123,5 @@ export const sounds = {
 // JS Chunks - preload lazy-loaded components and their dependencies
 export const chunks = {
   starfield: () => import("@/components/StarfieldLazy"),
+  game: () => import("@/views/Game"),
 } as const

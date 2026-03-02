@@ -502,6 +502,10 @@ export const DEFAULT_SECTORMAP_CONFIG: Omit<SectorMapConfigBase, "center_sector_
 export interface SectorMapProps {
   width: number
   height: number
+  /** Exact physical pixel dimensions from devicePixelContentBoxSize.
+   *  When set, used directly for canvas.width/height (skipping DPR multiply). */
+  physicalWidth?: number
+  physicalHeight?: number
   data: MapData
   config: SectorMapConfigBase
   maxDistance?: number
@@ -532,6 +536,18 @@ interface AnimationState {
 
 function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
+}
+
+/** Compute grid spacing, hex size, and scale from config and canvas dimensions */
+function getGridMetrics(
+  config: SectorMapConfigBase,
+  width: number,
+  height: number
+): { gridSpacing: number; hexSize: number; scale: number } {
+  const gridSpacing = config.grid_spacing ?? Math.min(width, height) / 10
+  const hexSize = config.hex_size ?? gridSpacing * 0.85
+  const scale = gridSpacing
+  return { gridSpacing, hexSize, scale }
 }
 
 /** Slugify region name for style lookup: lowercase, replace spaces with hyphens */
@@ -1295,7 +1311,6 @@ function renderSector(
     ctx.fill(isMegaPort ? megaPortPath : portPath)
     ctx.restore()
   }
-
 }
 
 /** Render hop number badges for course plot sectors (rendered above animation overlay) */
@@ -1354,6 +1369,73 @@ function renderCoursePlotBadges(
     ctx.restore()
   })
 
+  ctx.restore()
+}
+
+/** Cached hex grid renderer. The grid only depends on camera + viewport params,
+ *  not on interaction state (hover, course plot animation), so we cache it to
+ *  an OffscreenCanvas and reuse across hover/animation frames. */
+let hexGridCache: { canvas: OffscreenCanvas; key: string } | null = null
+
+function renderHexGridCached(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  cameraZoom: number,
+  cameraOffsetX: number,
+  cameraOffsetY: number,
+  scale: number,
+  hexSize: number,
+  gridStyle: { color: string; lineWidth: number }
+) {
+  const dpr = window.devicePixelRatio || 1
+  const key = `${width},${height},${dpr},${cameraZoom},${cameraOffsetX},${cameraOffsetY},${scale},${hexSize},${gridStyle.color},${gridStyle.lineWidth}`
+
+  if (!hexGridCache || hexGridCache.key !== key) {
+    const pw = Math.ceil(width * dpr)
+    const ph = Math.ceil(height * dpr)
+    const osc = new OffscreenCanvas(pw, ph)
+    const oscCtx = osc.getContext("2d")
+    if (!oscCtx) {
+      // Fallback: render directly
+      renderHexGrid(
+        ctx,
+        width,
+        height,
+        cameraZoom,
+        cameraOffsetX,
+        cameraOffsetY,
+        scale,
+        hexSize,
+        gridStyle
+      )
+      return
+    }
+
+    // Bake DPR + camera transforms into the cached image
+    oscCtx.scale(dpr, dpr)
+    oscCtx.translate(width / 2, height / 2)
+    oscCtx.scale(cameraZoom, cameraZoom)
+    oscCtx.translate(cameraOffsetX, cameraOffsetY)
+    renderHexGrid(
+      oscCtx as unknown as CanvasRenderingContext2D,
+      width,
+      height,
+      cameraZoom,
+      cameraOffsetX,
+      cameraOffsetY,
+      scale,
+      hexSize,
+      gridStyle
+    )
+
+    hexGridCache = { canvas: osc, key }
+  }
+
+  // Draw cached grid at identity (transforms are baked into the cached image)
+  ctx.save()
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.drawImage(hexGridCache.canvas, 0, 0)
   ctx.restore()
 }
 
@@ -1417,7 +1499,17 @@ function buildFeatherGradient(gradient: CanvasGradient, inward: boolean, falloff
 }
 
 /** Apply a rectangular feather mask around the edges in screen space.
- *  falloff controls the gradient curve: 1=linear, >1=steeper, <1=gentler. */
+ *  falloff controls the gradient curve: 1=linear, >1=steeper, <1=gentler.
+ *  Uses a cached OffscreenCanvas to avoid recreating gradients every frame. */
+let featherCache: {
+  canvas: OffscreenCanvas
+  width: number
+  height: number
+  dpr: number
+  featherSize: number
+  falloff: number
+} | null = null
+
 function applyRectangularFeatherMask(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -1426,33 +1518,59 @@ function applyRectangularFeatherMask(
   falloff: number = 1
 ) {
   if (featherSize <= 0) return
+
+  const dpr = window.devicePixelRatio || 1
+
+  // Check cache validity
+  if (
+    !featherCache ||
+    featherCache.width !== width ||
+    featherCache.height !== height ||
+    featherCache.dpr !== dpr ||
+    featherCache.featherSize !== featherSize ||
+    featherCache.falloff !== falloff
+  ) {
+    // Regenerate cached mask at device pixel resolution
+    const pw = Math.ceil(width * dpr)
+    const ph = Math.ceil(height * dpr)
+    const osc = new OffscreenCanvas(pw, ph)
+    const oscCtx = osc.getContext("2d")
+    if (!oscCtx) return
+
+    oscCtx.scale(dpr, dpr)
+
+    // Top edge
+    let gradient = oscCtx.createLinearGradient(0, 0, 0, featherSize)
+    buildFeatherGradient(gradient, true, falloff)
+    oscCtx.fillStyle = gradient
+    oscCtx.fillRect(0, 0, width, featherSize)
+
+    // Bottom edge
+    gradient = oscCtx.createLinearGradient(0, height - featherSize, 0, height)
+    buildFeatherGradient(gradient, false, falloff)
+    oscCtx.fillStyle = gradient
+    oscCtx.fillRect(0, height - featherSize, width, featherSize)
+
+    // Left edge
+    gradient = oscCtx.createLinearGradient(0, 0, featherSize, 0)
+    buildFeatherGradient(gradient, true, falloff)
+    oscCtx.fillStyle = gradient
+    oscCtx.fillRect(0, 0, featherSize, height)
+
+    // Right edge
+    gradient = oscCtx.createLinearGradient(width - featherSize, 0, width, 0)
+    buildFeatherGradient(gradient, false, falloff)
+    oscCtx.fillStyle = gradient
+    oscCtx.fillRect(width - featherSize, 0, featherSize, height)
+
+    featherCache = { canvas: osc, width, height, dpr, featherSize, falloff }
+  }
+
+  // Apply cached mask via compositing — draw at identity since DPR is baked in
   ctx.save()
   ctx.globalCompositeOperation = "destination-out"
-
-  // Top edge
-  let gradient = ctx.createLinearGradient(0, 0, 0, featherSize)
-  buildFeatherGradient(gradient, true, falloff)
-  ctx.fillStyle = gradient
-  ctx.fillRect(0, 0, width, featherSize)
-
-  // Bottom edge
-  gradient = ctx.createLinearGradient(0, height - featherSize, 0, height)
-  buildFeatherGradient(gradient, false, falloff)
-  ctx.fillStyle = gradient
-  ctx.fillRect(0, height - featherSize, width, featherSize)
-
-  // Left edge
-  gradient = ctx.createLinearGradient(0, 0, featherSize, 0)
-  buildFeatherGradient(gradient, true, falloff)
-  ctx.fillStyle = gradient
-  ctx.fillRect(0, 0, featherSize, height)
-
-  // Right edge
-  gradient = ctx.createLinearGradient(width - featherSize, 0, width, 0)
-  buildFeatherGradient(gradient, false, falloff)
-  ctx.fillStyle = gradient
-  ctx.fillRect(width - featherSize, 0, featherSize, height)
-
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.drawImage(featherCache.canvas, 0, 0)
   ctx.restore()
 }
 
@@ -1928,145 +2046,51 @@ function renderShipLabels(
   ctx.restore()
 }
 
-/** Core rendering with explicit camera state */
-function renderWithCameraState(
+/** Set up canvas for rendering: apply DPR scaling, guard dimensions, clear pixels.
+ *  Returns the configured 2d context, or null if unavailable. */
+function setupCanvas(
   canvas: HTMLCanvasElement,
   props: SectorMapProps,
-  cameraState: CameraState
-) {
-  const { width, height, config, coursePlot, ships } = props
+  width: number,
+  height: number
+): CanvasRenderingContext2D | null {
   const ctx = canvas.getContext("2d")
-  if (!ctx) return
+  if (!ctx) return null
 
   const dpr = window.devicePixelRatio || 1
-  canvas.width = width * dpr
-  canvas.height = height * dpr
-  ctx.scale(dpr, dpr)
+  const targetW = props.physicalWidth ?? Math.round(width * dpr)
+  const targetH = props.physicalHeight ?? Math.round(height * dpr)
+  if (canvas.width !== targetW || canvas.height !== targetH) {
+    canvas.width = targetW
+    canvas.height = targetH
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, width, height)
+  return ctx
+}
+
+/** Render the empty/no-data state: background, hex grid, and feather mask */
+function renderEmptyState(
+  canvas: HTMLCanvasElement,
+  props: SectorMapProps,
+  width: number,
+  height: number,
+  scale: number,
+  hexSize: number,
+  config: SectorMapConfigBase
+) {
+  const ctx = setupCanvas(canvas, props, width, height)
+  if (!ctx) return
 
   ctx.fillStyle = config.uiStyles.background.color
   ctx.fillRect(0, 0, width, height)
 
-  const gridSpacing = config.grid_spacing ?? Math.min(width, height) / 10
-  const hexSize = config.hex_size ?? gridSpacing * 0.85
-  const scale = gridSpacing
-
-  // Pre-compute course plot Sets for O(1) lookups
-  const coursePlotSectors = coursePlot ? new Set(coursePlot.path) : null
-  const coursePlotLanes =
-    coursePlot ?
-      new Set(
-        coursePlot.path.slice(0, -1).map((from, i) => {
-          const to = coursePlot.path[i + 1]
-          return getUndirectedLaneKey(from, to)
-        })
-      )
-    : null
-
-  // 1) Draw grid and glows in world space (will be feathered)
-  ctx.save()
-  ctx.translate(width / 2, height / 2)
-  ctx.scale(cameraState.zoom, cameraState.zoom)
-  ctx.translate(cameraState.offsetX, cameraState.offsetY)
-
   if (config.show_grid) {
-    renderHexGrid(
-      ctx,
-      width,
-      height,
-      cameraState.zoom,
-      cameraState.offsetX,
-      cameraState.offsetY,
-      scale,
-      hexSize,
-      config.uiStyles.grid
-    )
+    renderHexGridCached(ctx, width, height, 1, 0, 0, scale, hexSize, config.uiStyles.grid)
   }
 
-  // Render glows before feather mask so they fade at edges
-  renderSectorGlows(ctx, cameraState.filteredData, scale, config, 1, coursePlotSectors)
-
-  ctx.restore()
-
-  // 2) Apply rectangular feather mask to background, grid, and glows (screen space)
-  const featherSize = Math.min(config.uiStyles.edgeFeather.size, Math.min(width, height) / 2)
-  applyRectangularFeatherMask(ctx, width, height, featherSize, config.uiStyles.edgeFeather.falloff)
-
-  // 3) Draw lanes and sectors in world space (unmasked - stays crisp at edges)
-  ctx.save()
-  ctx.translate(width / 2, height / 2)
-  ctx.scale(cameraState.zoom, cameraState.zoom)
-  ctx.translate(cameraState.offsetX, cameraState.offsetY)
-
-  if (config.show_warps) {
-    renderAllLanes(
-      ctx,
-      cameraState.filteredData,
-      props.data,
-      scale,
-      hexSize,
-      config,
-      coursePlotLanes,
-      coursePlot
-    )
-  }
-
-  const fadingInIds = new Set(cameraState.fadingInData?.map((s) => s.id) ?? [])
-
-  if (cameraState.fadingOutData && cameraState.fadeProgress !== undefined) {
-    const fadeOpacity = 1 - cameraState.fadeProgress
-    cameraState.fadingOutData.forEach((node) => {
-      renderSector(ctx, node, scale, hexSize, config, fadeOpacity, coursePlotSectors)
-    })
-  }
-
-  cameraState.filteredData.forEach((node) => {
-    const opacity =
-      fadingInIds.has(node.id) && cameraState.fadeProgress !== undefined ?
-        cameraState.fadeProgress
-      : 1
-    renderSector(ctx, node, scale, hexSize, config, opacity, coursePlotSectors)
-  })
-
-  if (config.debug) {
-    renderDebugBounds(ctx, cameraState.filteredData, scale, hexSize)
-  }
-
-  ctx.restore()
-
-  renderShipLabels(
-    ctx,
-    cameraState.filteredData,
-    scale,
-    hexSize,
-    width,
-    height,
-    cameraState,
-    config,
-    ships,
-    null
-  )
-  renderPortLabels(
-    ctx,
-    cameraState.filteredData,
-    scale,
-    hexSize,
-    width,
-    height,
-    cameraState,
-    config,
-    null
-  )
-  renderSectorLabels(
-    ctx,
-    cameraState.filteredData,
-    scale,
-    hexSize,
-    width,
-    height,
-    cameraState,
-    config,
-    null
-  )
+  const feather = Math.min(config.uiStyles.edgeFeather.size, Math.min(width, height) / 2)
+  applyRectangularFeatherMask(ctx, width, height, feather, config.uiStyles.edgeFeather.falloff)
 }
 
 /** Render animated arrows on course plot lanes only */
@@ -2082,9 +2106,7 @@ function renderCoursePlotAnimation(
   const ctx = canvas.getContext("2d")
   if (!ctx) return
 
-  const gridSpacing = config.grid_spacing ?? Math.min(width, height) / 10
-  const hexSize = config.hex_size ?? gridSpacing * 0.85
-  const scale = gridSpacing
+  const { hexSize, scale } = getGridMetrics(config, width, height)
 
   const sectorIndex = createSectorIndex(cameraState.filteredData)
 
@@ -2095,7 +2117,6 @@ function renderCoursePlotAnimation(
   ctx.scale(cameraState.zoom, cameraState.zoom)
   ctx.translate(cameraState.offsetX, cameraState.offsetY)
 
-  // Draw animated dashes on course plot lanes
   if (animStyle.shadowBlur > 0 && animStyle.shadowColor !== "none") {
     ctx.shadowBlur = animStyle.shadowBlur
     ctx.shadowColor = animStyle.shadowColor
@@ -2143,22 +2164,14 @@ function renderWithCameraStateAndInteraction(
   courseAnimationOffset = 0
 ) {
   const { width, height, config, coursePlot, ships } = props
-  const ctx = canvas.getContext("2d")
+  const ctx = setupCanvas(canvas, props, width, height)
   if (!ctx) return
-
-  const dpr = window.devicePixelRatio || 1
-  canvas.width = width * dpr
-  canvas.height = height * dpr
-  ctx.scale(dpr, dpr)
 
   ctx.fillStyle = config.uiStyles.background.color
   ctx.fillRect(0, 0, width, height)
 
-  const gridSpacing = config.grid_spacing ?? Math.min(width, height) / 10
-  const hexSize = config.hex_size ?? gridSpacing * 0.85
-  const scale = gridSpacing
+  const { hexSize, scale } = getGridMetrics(config, width, height)
 
-  // Pre-compute course plot Sets for O(1) lookups
   const coursePlotSectors = coursePlot ? new Set(coursePlot.path) : null
   const coursePlotLanes =
     coursePlot ?
@@ -2170,7 +2183,6 @@ function renderWithCameraStateAndInteraction(
       )
     : null
 
-  // 1) Draw grid and glows in world space (will be feathered)
   ctx.save()
   ctx.translate(width / 2, height / 2)
   ctx.scale(cameraState.zoom, cameraState.zoom)
@@ -2190,7 +2202,6 @@ function renderWithCameraStateAndInteraction(
     )
   }
 
-  // Render glows before feather mask so they fade at edges
   renderSectorGlows(
     ctx,
     cameraState.filteredData,
@@ -2203,11 +2214,9 @@ function renderWithCameraStateAndInteraction(
 
   ctx.restore()
 
-  // 2) Apply rectangular feather mask to background, grid, and glows (screen space)
   const featherSize = Math.min(config.uiStyles.edgeFeather.size, Math.min(width, height) / 2)
   applyRectangularFeatherMask(ctx, width, height, featherSize, config.uiStyles.edgeFeather.falloff)
 
-  // 3) Draw lanes and sectors in world space (unmasked - stays crisp at edges)
   ctx.save()
   ctx.translate(width / 2, height / 2)
   ctx.scale(cameraState.zoom, cameraState.zoom)
@@ -2271,12 +2280,10 @@ function renderWithCameraStateAndInteraction(
 
   ctx.restore()
 
-  // 4) Draw course plot animation overlay (marching ants) above sectors but below labels
   if (coursePlot && courseAnimationOffset !== undefined) {
     renderCoursePlotAnimation(canvas, props, cameraState, courseAnimationOffset)
   }
 
-  // 5) Labels always render last so they're never obscured
   if (coursePlot) {
     renderCoursePlotBadges(ctx, scale, hexSize, width, height, cameraState, coursePlot)
   }
@@ -2343,7 +2350,6 @@ export function createSectorMapController(
   let courseAnimationFrameId: number | null = null
   let courseAnimationOffset = 0
 
-  // Click interaction state
   let hoveredSectorId: number | null = null
   let onNodeClickCallback: ((node: MapSectorNode | null) => void) | null = null
   let onNodeEnterCallback: ((node: MapSectorNode) => void) | null = null
@@ -2351,8 +2357,6 @@ export function createSectorMapController(
   let onViewportChangeCallback: ((centerSectorId: number, bounds: number) => void) | null = null
   let viewportChangeTimeoutId: number | null = null
 
-  // Hover animation state
-  // animatingSectorId tracks which sector is being animated (for smooth out-animation)
   let animatingSectorId: number | null = null
   let hoverAnimationProgress = 0
   let hoverAnimationTarget = 0
@@ -2360,20 +2364,14 @@ export function createSectorMapController(
   let hoverAnimationStartProgress = 0
   let hoverAnimationFrameId: number | null = null
 
-  // Movement animation lock
   let isMovingToSector = false
 
-  // When true, the user has explicitly zoomed (slider or scroll wheel) while a
-  // course plot is active.  The course plot is still rendered, but the camera
-  // framing ignores it so the user's zoom takes effect.
   let userOverrodeCoursePlotZoom = false
 
-  // Manual pan/zoom offsets (applied on top of computed camera state)
   let manualPanX = 0
   let manualPanY = 0
   let manualZoomFactor = 1
 
-  // Drag interaction state
   let isDragging = false
   let dragStartX = 0
   let dragStartY = 0
@@ -2441,17 +2439,13 @@ export function createSectorMapController(
     }
   }
 
-  // Get mouse position relative to canvas, accounting for object-fit: contain
   const getCanvasMousePosition = (event: MouseEvent): { x: number; y: number } => {
     const rect = canvas.getBoundingClientRect()
     const dpr = window.devicePixelRatio || 1
 
-    // Get actual logical dimensions from the canvas element
     const logicalWidth = canvas.width / dpr
     const logicalHeight = canvas.height / dpr
 
-    // With object-fit: contain, the content is scaled uniformly to fit
-    // and centered within the CSS box. We need to account for letterboxing.
     const boxAspect = rect.width / rect.height
     const contentAspect = logicalWidth / logicalHeight
 
@@ -2461,22 +2455,18 @@ export function createSectorMapController(
     let offsetY = 0
 
     if (boxAspect > contentAspect) {
-      // Box is wider than content - letterboxing on left/right
       contentHeight = rect.height
       contentWidth = rect.height * contentAspect
       offsetX = (rect.width - contentWidth) / 2
     } else {
-      // Box is taller than content - letterboxing on top/bottom
       contentWidth = rect.width
       contentHeight = rect.width / contentAspect
       offsetY = (rect.height - contentHeight) / 2
     }
 
-    // Position relative to the actual content area (accounting for letterboxing)
     const contentRelativeX = event.clientX - rect.left - offsetX
     const contentRelativeY = event.clientY - rect.top - offsetY
 
-    // Scale from content display size to logical coordinates
     const scaleX = logicalWidth / contentWidth
     const scaleY = logicalHeight / contentHeight
 
@@ -2486,21 +2476,17 @@ export function createSectorMapController(
     }
   }
 
-  // Find sector under mouse position
   const findSectorAtMouse = (screenX: number, screenY: number): MapSectorNode | null => {
     if (!currentCameraState) return null
 
     const { width, height, config } = currentProps
-    const gridSpacing = config.grid_spacing ?? Math.min(width, height) / 10
-    const hexSize = config.hex_size ?? gridSpacing * 0.85
-    const scale = gridSpacing
+    const { hexSize, scale } = getGridMetrics(config, width, height)
 
     const effective = getEffectiveCameraState(currentCameraState)
     const worldPos = screenToWorld(screenX, screenY, width, height, effective)
     return findSectorAtPoint(worldPos.x, worldPos.y, effective.filteredData, scale, hexSize)
   }
 
-  // Start hover animation loop
   const startHoverAnimation = () => {
     if (hoverAnimationFrameId !== null) return
 
@@ -2518,7 +2504,6 @@ export function createSectorMapController(
         hoverAnimationStartProgress +
         (hoverAnimationTarget - hoverAnimationStartProgress) * easedProgress
 
-      // Re-render with current hover scale
       if (currentCameraState) {
         renderWithInteractionState()
       }
@@ -2528,7 +2513,6 @@ export function createSectorMapController(
       } else {
         hoverAnimationFrameId = null
         hoverAnimationStartTime = null
-        // Clear animating sector when animation completes at 0 (hover out complete)
         if (hoverAnimationTarget === 0) {
           animatingSectorId = null
         }
@@ -2538,7 +2522,6 @@ export function createSectorMapController(
     hoverAnimationFrameId = requestAnimationFrame(animateHover)
   }
 
-  // Stop hover animation
   const stopHoverAnimation = () => {
     if (hoverAnimationFrameId !== null) {
       cancelAnimationFrame(hoverAnimationFrameId)
@@ -2547,13 +2530,10 @@ export function createSectorMapController(
     }
   }
 
-  // Set hover animation target and start animation
   const setHoverTarget = (target: number, sectorId: number | null) => {
-    // If starting a new hover, set the animating sector
     if (target === 1 && sectorId !== null) {
       animatingSectorId = sectorId
     }
-    // If same target and same sector, nothing to do
     if (hoverAnimationTarget === target && animatingSectorId === sectorId) return
 
     hoverAnimationStartProgress = hoverAnimationProgress
@@ -2562,9 +2542,7 @@ export function createSectorMapController(
     startHoverAnimation()
   }
 
-  // Mouse event handlers
   const handleMouseMove = (event: MouseEvent) => {
-    // Disable hover when not hoverable or moving to sector
     if (!currentProps.config.hoverable || isMovingToSector) return
 
     const pos = getCanvasMousePosition(event)
@@ -2575,9 +2553,7 @@ export function createSectorMapController(
       const previousHoveredId = hoveredSectorId
       hoveredSectorId = newHoveredId
 
-      // Fire exit callback for previous sector
       if (previousHoveredId !== null && onNodeExitCallback) {
-        // Find the previous sector from filtered data
         const exitedSector = currentCameraState?.filteredData.find(
           (s) => s.id === previousHoveredId
         )
@@ -2586,53 +2562,42 @@ export function createSectorMapController(
         }
       }
 
-      // Fire enter callback for new sector
       if (sector !== null && onNodeEnterCallback) {
         onNodeEnterCallback(sector)
       }
 
       if (newHoveredId !== null) {
-        // Hovering over a new sector
         setHoverTarget(1, newHoveredId)
       } else if (previousHoveredId !== null) {
-        // Hovering out - animate out the previous sector
         setHoverTarget(0, previousHoveredId)
       }
 
-      // Update cursor
       canvas.style.cursor = newHoveredId !== null ? "pointer" : "default"
     }
   }
 
   const handleMouseClick = (event: MouseEvent) => {
-    // Suppress click after a drag gesture
     if (suppressNextClick) {
       suppressNextClick = false
       return
     }
-    // Disable click when not clickable or moving to sector
     if (!currentProps.config.clickable || isMovingToSector) return
 
     const pos = getCanvasMousePosition(event)
     const sector = findSectorAtMouse(pos.x, pos.y)
 
-    // Call the callback with sector (or null if clicking empty space to deselect)
-    // The parent component is responsible for updating center_sector_id
     if (onNodeClickCallback) {
       onNodeClickCallback(sector)
     }
   }
 
   const handleMouseLeave = () => {
-    // Don't interfere with active drag (pointer capture handles this)
     if (isDragging) return
-    // Disable interaction when not hoverable or moving to sector
     if (!currentProps.config.hoverable || isMovingToSector) return
 
     if (hoveredSectorId !== null) {
       const previousHoveredId = hoveredSectorId
 
-      // Fire exit callback for the sector we're leaving
       if (onNodeExitCallback) {
         const exitedSector = currentCameraState?.filteredData.find(
           (s) => s.id === previousHoveredId
@@ -2648,7 +2613,6 @@ export function createSectorMapController(
     }
   }
 
-  // Drag-to-pan handlers (pointer events for touch compatibility)
   const handlePointerDown = (event: PointerEvent) => {
     if (!currentProps.config.draggable || isMovingToSector) return
     isDragging = false
@@ -2659,38 +2623,39 @@ export function createSectorMapController(
 
   const handlePointerMove = (event: PointerEvent) => {
     if (!currentProps.config.draggable || isMovingToSector) return
-    // Only process if we have pointer capture (button is down)
     if (!canvas.hasPointerCapture(event.pointerId)) return
 
-    const dx = event.clientX - dragStartX
-    const dy = event.clientY - dragStartY
+    const events = event.getCoalescedEvents?.() ?? [event]
 
-    // Require minimum distance to distinguish drag from click
-    if (!isDragging && Math.abs(dx) < 3 && Math.abs(dy) < 3) return
+    for (const e of events) {
+      const dx = e.clientX - dragStartX
+      const dy = e.clientY - dragStartY
 
-    if (!isDragging) {
-      isDragging = true
-      // Clear hover state when starting a drag
-      if (hoveredSectorId !== null) {
-        const prevId = hoveredSectorId
-        hoveredSectorId = null
-        setHoverTarget(0, prevId)
+      if (!isDragging && Math.abs(dx) < 3 && Math.abs(dy) < 3) continue
+
+      if (!isDragging) {
+        isDragging = true
+        if (hoveredSectorId !== null) {
+          const prevId = hoveredSectorId
+          hoveredSectorId = null
+          setHoverTarget(0, prevId)
+        }
+        canvas.style.cursor = "grabbing"
       }
-      canvas.style.cursor = "grabbing"
+
+      if (currentCameraState) {
+        const effectiveZoom = getEffectiveCameraState(currentCameraState).zoom
+        manualPanX += dx / effectiveZoom
+        manualPanY += dy / effectiveZoom
+      }
+
+      dragStartX = e.clientX
+      dragStartY = e.clientY
     }
 
-    // Convert screen delta to world delta (divide by effective zoom)
-    if (currentCameraState) {
-      const effectiveZoom = getEffectiveCameraState(currentCameraState).zoom
-      manualPanX += dx / effectiveZoom
-      manualPanY += dy / effectiveZoom
+    if (isDragging) {
+      renderWithInteractionState()
     }
-
-    dragStartX = event.clientX
-    dragStartY = event.clientY
-
-    // Re-render with updated offsets
-    renderWithInteractionState()
   }
 
   const handlePointerUp = (event: PointerEvent) => {
@@ -2706,13 +2671,10 @@ export function createSectorMapController(
     }
   }
 
-  // Scroll-to-zoom handler — smooth zoom toward cursor position.
-  // Independent from the slider/store; course plot save/restore uses savedEffectiveZoom.
   const handleWheel = (event: WheelEvent) => {
     if (!currentProps.config.scrollZoom || isMovingToSector || !currentCameraState) return
     event.preventDefault()
 
-    // Mark that the user explicitly zoomed while a course plot is active
     if (currentProps.coursePlot && currentProps.config.coursePlotZoomEnabled !== false) {
       userOverrodeCoursePlotZoom = true
     }
@@ -2721,23 +2683,19 @@ export function createSectorMapController(
     const zoomDelta = 1 - event.deltaY * zoomSensitivity
     const oldEffective = getEffectiveCameraState(currentCameraState)
 
-    // Compute new zoom factor, clamping to bounds
     const minZoom = currentProps.config.minZoom ?? 0.08
     const maxZoom = currentProps.config.maxZoom ?? 5
     const newZoom = Math.max(minZoom, Math.min(oldEffective.zoom * zoomDelta, maxZoom))
     manualZoomFactor = newZoom / currentCameraState.zoom
 
-    // Zoom toward cursor: keep the world point under the cursor fixed
     const { width, height } = currentProps
     const pos = getCanvasMousePosition(event as unknown as MouseEvent)
     const screenX = pos.x
     const screenY = pos.y
 
-    // World point under cursor at old zoom
     const worldX = (screenX - width / 2) / oldEffective.zoom - oldEffective.offsetX
     const worldY = (screenY - height / 2) / oldEffective.zoom - oldEffective.offsetY
 
-    // Solve for new manualPan so that worldX/worldY stays at screenX/screenY
     manualPanX = (screenX - width / 2) / newZoom - currentCameraState.offsetX - worldX
     manualPanY = (screenY - height / 2) / newZoom - currentCameraState.offsetY - worldY
 
@@ -2745,7 +2703,6 @@ export function createSectorMapController(
     scheduleViewportChange()
   }
 
-  // Attach/detach event listeners
   const attachEventListeners = () => {
     canvas.addEventListener("mousemove", handleMouseMove)
     canvas.addEventListener("click", handleMouseClick)
@@ -2767,7 +2724,6 @@ export function createSectorMapController(
     canvas.style.cursor = "default"
   }
 
-  // Render with interaction state (hover/selected)
   const renderWithInteractionState = () => {
     if (!currentCameraState) return
 
@@ -2787,12 +2743,8 @@ export function createSectorMapController(
 
   const render = () => {
     const { width, height, data, config, maxDistance = 3, coursePlot } = currentProps
-    const gridSpacing = config.grid_spacing ?? Math.min(width, height) / 10
-    const hexSize = config.hex_size ?? gridSpacing * 0.85
-    const scale = gridSpacing
+    const { hexSize, scale } = getGridMetrics(config, width, height)
 
-    // When coursePlotZoomEnabled is false or the user has overridden zoom,
-    // don't let the course plot affect camera framing
     const coursePlotForCamera =
       config.coursePlotZoomEnabled !== false && !userOverrodeCoursePlotZoom ? coursePlot : undefined
 
@@ -2808,55 +2760,10 @@ export function createSectorMapController(
     )
 
     if (!cameraState) {
-      const ctx = canvas.getContext("2d")
-      if (ctx) {
-        const dpr = window.devicePixelRatio || 1
-        canvas.width = width * dpr
-        canvas.height = height * dpr
-        ctx.scale(dpr, dpr)
-        ctx.fillStyle = config.uiStyles.background.color
-        ctx.fillRect(0, 0, width, height)
-
-        // Draw hex grid background even with no map data
-        if (config.show_grid) {
-          const defaultZoom = 1
-          const defaultOffsetX = 0
-          const defaultOffsetY = 0
-
-          ctx.save()
-          ctx.translate(width / 2, height / 2)
-          ctx.scale(defaultZoom, defaultZoom)
-          ctx.translate(defaultOffsetX, defaultOffsetY)
-
-          renderHexGrid(
-            ctx,
-            width,
-            height,
-            defaultZoom,
-            defaultOffsetX,
-            defaultOffsetY,
-            scale,
-            hexSize,
-            config.uiStyles.grid
-          )
-          ctx.restore()
-        }
-
-        const feather = Math.min(config.uiStyles.edgeFeather.size, Math.min(width, height) / 2)
-        applyRectangularFeatherMask(
-          ctx,
-          width,
-          height,
-          feather,
-          config.uiStyles.edgeFeather.falloff
-        )
-      }
+      renderEmptyState(canvas, currentProps, width, height, scale, hexSize, config)
       return
     }
 
-    // Recalibrate manual zoom factor when the base camera zoom changes
-    // (e.g. maxDistance update from scroll-zoom syncing to store) so the
-    // effective zoom stays continuous instead of jumping.
     if (manualZoomFactor !== 1 && currentCameraState && cameraState.zoom > 0) {
       const prevEffectiveZoom = getEffectiveCameraState(currentCameraState).zoom
       manualZoomFactor = prevEffectiveZoom / cameraState.zoom
@@ -2878,8 +2785,6 @@ export function createSectorMapController(
     )
   }
 
-  // Animate camera reframe (e.g., when entering/exiting course plot mode)
-  // targetZoomOverride: if set, animate to this zoom level instead of the computed one
   const animateCameraReframe = (onComplete?: () => void, targetZoomOverride?: number) => {
     if (animationCleanup) {
       animationCleanup()
@@ -2891,12 +2796,8 @@ export function createSectorMapController(
     }
 
     const { width, height, data, config, maxDistance = 3, coursePlot } = currentProps
-    const gridSpacing = config.grid_spacing ?? Math.min(width, height) / 10
-    const hexSize = config.hex_size ?? gridSpacing * 0.85
-    const scale = gridSpacing
+    const { hexSize, scale } = getGridMetrics(config, width, height)
 
-    // When coursePlotZoomEnabled is false or user has overridden zoom,
-    // don't let the course plot affect camera framing
     const coursePlotForCamera =
       config.coursePlotZoomEnabled !== false && !userOverrodeCoursePlotZoom ? coursePlot : undefined
 
@@ -2918,16 +2819,13 @@ export function createSectorMapController(
       return
     }
 
-    // Apply zoom override so the animation lands at the desired zoom level
     if (targetZoomOverride !== undefined) {
       targetCameraState.zoom = targetZoomOverride
     }
 
-    // Start animation from effective (manually-offset) position for smooth transition
     const effectiveStart = getEffectiveCameraState(currentCameraState)
     resetManualOffsets()
 
-    // Calculate fading sectors
     const currentDataIds = new Set(effectiveStart.filteredData.map((s) => s.id))
     const targetDataIds = new Set(targetCameraState.filteredData.map((s) => s.id))
     const fadingOutData = effectiveStart.filteredData.filter((s) => !targetDataIds.has(s.id))
@@ -2973,7 +2871,6 @@ export function createSectorMapController(
         fadeProgress
       )
 
-      // Advance course animation during reframe
       if (currentProps.coursePlot) {
         courseAnimationOffset = (courseAnimationOffset + 0.5) % 20
       }
@@ -3018,10 +2915,8 @@ export function createSectorMapController(
       animationCompletionTimeout = null
     }
 
-    // Lock interaction during movement (but preserve selection)
     isMovingToSector = true
 
-    // If there's an active hover, clear it immediately
     if (hoveredSectorId !== null || animatingSectorId !== null) {
       hoveredSectorId = null
       animatingSectorId = null
@@ -3031,7 +2926,6 @@ export function createSectorMapController(
     }
     canvas.style.cursor = "default"
 
-    // Temporarily stop course animation during transition
     const wasAnimating = courseAnimationFrameId !== null
     if (wasAnimating) {
       stopCourseAnimation()
@@ -3045,9 +2939,7 @@ export function createSectorMapController(
     currentProps = updatedProps
 
     if (currentCameraState) {
-      // Start animation from effective (manually-offset) position for smooth transition
       const effectiveStart = getEffectiveCameraState(currentCameraState)
-      // Preserve manual zoom unless a course plot is actively controlling the camera framing
       const coursePlotControlsCamera =
         !!updatedProps.coursePlot &&
         updatedProps.config.coursePlotZoomEnabled !== false &&
@@ -3056,9 +2948,9 @@ export function createSectorMapController(
       const preservedZoom = hadManualZoom ? effectiveStart.zoom : undefined
       resetManualOffsets()
 
-      // Pass effective coursePlotZoomEnabled to the animation target calculation
-      const animationProps = userOverrodeCoursePlotZoom
-        ? { ...updatedProps, config: { ...updatedProps.config, coursePlotZoomEnabled: false } }
+      const animationProps =
+        userOverrodeCoursePlotZoom ?
+          { ...updatedProps, config: { ...updatedProps.config, coursePlotZoomEnabled: false } }
         : updatedProps
       animationCleanup = updateCurrentSector(
         canvas,
@@ -3075,29 +2967,24 @@ export function createSectorMapController(
 
       animationCompletionTimeout = window.setTimeout(() => {
         currentCameraState = getCurrentCameraState(
-          userOverrodeCoursePlotZoom
-            ? { ...updatedProps, config: { ...updatedProps.config, coursePlotZoomEnabled: false } }
-            : updatedProps
+          userOverrodeCoursePlotZoom ?
+            { ...updatedProps, config: { ...updatedProps.config, coursePlotZoomEnabled: false } }
+          : updatedProps
         )
-        // Restore manual zoom factor so effective zoom matches the user's previous level
         if (hadManualZoom && currentCameraState && preservedZoom !== undefined) {
           manualZoomFactor = preservedZoom / currentCameraState.zoom
         }
         animationCleanup = null
         animationCompletionTimeout = null
         isMovingToSector = false
-        // Start course animation if course plot is active
         if (updatedProps.coursePlot) {
           startCourseAnimation()
         }
-        // Repaint with current data so any props that changed during the
-        // animation (e.g. port mega flag from a map.update) are visible.
         renderWithInteractionState()
       }, animDuration)
     } else {
       render()
       isMovingToSector = false
-      // Start course animation immediately if course plot is active
       if (updatedProps.coursePlot) {
         startCourseAnimation()
       }
@@ -3112,9 +2999,6 @@ export function createSectorMapController(
     const wasHoverable = currentProps.config.hoverable
     const prevMaxDistance = currentProps.maxDistance
 
-    // Invalidate the effective-camera filtered data cache when the underlying
-    // data changes, so that updated sector properties (e.g. mega port flag)
-    // are picked up on the next render.
     if (newProps.data) {
       lastEffectiveFilterKey = ""
       lastEffectiveFilteredData = null
@@ -3125,7 +3009,6 @@ export function createSectorMapController(
       Object.assign(currentProps.config, newProps.config)
     }
 
-    // Check course plot AFTER merging props (to handle partial updates that don't include coursePlot)
     const hasCoursePlot = currentProps.coursePlot !== undefined && currentProps.coursePlot !== null
 
     // Reset user zoom override on course plot transitions (new plot or cleared)
@@ -3312,9 +3195,9 @@ export function createSectorMapController(
       const visibleRadius = Math.max(visibleWorldW, visibleWorldH) / 2
       const hexRadius = visibleRadius / (scale * Math.sqrt(3))
 
-      // Use same formula as getViewportFetchBounds: ceil(radius * FETCH_BOUNDS_MULTIPLIER)
-      // FETCH_BOUNDS_MULTIPLIER = 2, capped at 100
-      const bounds = Math.max(0, Math.min(100, Math.ceil(hexRadius * 2)))
+      // Quantize to multiples of 5 to avoid jitter from floating-point variance
+      const raw = Math.ceil(hexRadius * 2)
+      const bounds = Math.max(0, Math.min(100, Math.ceil(raw / 5) * 5))
       onViewportChangeCallback(nearest.id, bounds)
     }, VIEWPORT_CHANGE_DEBOUNCE)
   }
@@ -3373,9 +3256,7 @@ export function createSectorMapController(
 export function renderSectorMapCanvas(canvas: HTMLCanvasElement, props: SectorMapProps) {
   const { width, height, data, config, maxDistance = 3, coursePlot } = props
 
-  const gridSpacing = config.grid_spacing ?? Math.min(width, height) / 10
-  const hexSize = config.hex_size ?? gridSpacing * 0.85
-  const scale = gridSpacing
+  const { hexSize, scale } = getGridMetrics(config, width, height)
 
   const coursePlotForCamera = config.coursePlotZoomEnabled !== false ? coursePlot : undefined
 
@@ -3391,57 +3272,28 @@ export function renderSectorMapCanvas(canvas: HTMLCanvasElement, props: SectorMa
   )
 
   if (!cameraState) {
-    const ctx = canvas.getContext("2d")
-    if (ctx) {
-      const dpr = window.devicePixelRatio || 1
-      canvas.width = width * dpr
-      canvas.height = height * dpr
-      ctx.scale(dpr, dpr)
-      ctx.fillStyle = config.uiStyles.background.color
-      ctx.fillRect(0, 0, width, height)
-
-      // Draw hex grid background even with no map data
-      if (config.show_grid) {
-        const defaultZoom = 1
-        const defaultOffsetX = 0
-        const defaultOffsetY = 0
-
-        ctx.save()
-        ctx.translate(width / 2, height / 2)
-        ctx.scale(defaultZoom, defaultZoom)
-        ctx.translate(defaultOffsetX, defaultOffsetY)
-
-        renderHexGrid(
-          ctx,
-          width,
-          height,
-          defaultZoom,
-          defaultOffsetX,
-          defaultOffsetY,
-          scale,
-          hexSize,
-          config.uiStyles.grid
-        )
-        ctx.restore()
-      }
-
-      const feather = Math.min(config.uiStyles.edgeFeather.size, Math.min(width, height) / 2)
-      applyRectangularFeatherMask(ctx, width, height, feather, config.uiStyles.edgeFeather.falloff)
-    }
+    renderEmptyState(canvas, props, width, height, scale, hexSize, config)
     return
   }
 
-  renderWithCameraState(canvas, props, cameraState)
+  renderWithCameraStateAndInteraction(canvas, props, cameraState, null, null, 1)
 }
 
 /** Get current camera state for tracking between renders */
 export function getCurrentCameraState(props: SectorMapProps): CameraState | null {
   const { width, height, data, config, maxDistance = 3, coursePlot } = props
-  const gridSpacing = config.grid_spacing ?? Math.min(width, height) / 10
-  const hexSize = config.hex_size ?? gridSpacing * 0.85
-  const scale = gridSpacing
+  const { hexSize, scale } = getGridMetrics(config, width, height)
   const coursePlotForCamera = config.coursePlotZoomEnabled !== false ? coursePlot : undefined
-  return calculateCameraState(data, config, width, height, scale, hexSize, maxDistance, coursePlotForCamera)
+  return calculateCameraState(
+    data,
+    config,
+    width,
+    height,
+    scale,
+    hexSize,
+    maxDistance,
+    coursePlotForCamera
+  )
 }
 
 /** Animate transition to new sector */
@@ -3454,9 +3306,7 @@ export function updateCurrentSector(
 ): () => void {
   const { width, height, data, config, maxDistance = 3, coursePlot } = props
 
-  const gridSpacing = config.grid_spacing ?? Math.min(width, height) / 10
-  const hexSize = config.hex_size ?? gridSpacing * 0.85
-  const scale = gridSpacing
+  const { hexSize, scale } = getGridMetrics(config, width, height)
 
   const newConfig = { ...config, center_sector_id: newSectorId }
 
@@ -3476,43 +3326,7 @@ export function updateCurrentSector(
   )
 
   if (!targetCameraState) {
-    const ctx = canvas.getContext("2d")
-    if (ctx) {
-      const dpr = window.devicePixelRatio || 1
-      canvas.width = width * dpr
-      canvas.height = height * dpr
-      ctx.scale(dpr, dpr)
-      ctx.fillStyle = config.uiStyles.background.color
-      ctx.fillRect(0, 0, width, height)
-
-      // Draw hex grid background even with no map data
-      if (config.show_grid) {
-        const defaultZoom = 1
-        const defaultOffsetX = 0
-        const defaultOffsetY = 0
-
-        ctx.save()
-        ctx.translate(width / 2, height / 2)
-        ctx.scale(defaultZoom, defaultZoom)
-        ctx.translate(defaultOffsetX, defaultOffsetY)
-
-        renderHexGrid(
-          ctx,
-          width,
-          height,
-          defaultZoom,
-          defaultOffsetX,
-          defaultOffsetY,
-          scale,
-          hexSize,
-          config.uiStyles.grid
-        )
-        ctx.restore()
-      }
-
-      const feather = Math.min(config.uiStyles.edgeFeather.size, Math.min(width, height) / 2)
-      applyRectangularFeatherMask(ctx, width, height, feather, config.uiStyles.edgeFeather.falloff)
-    }
+    renderEmptyState(canvas, props, width, height, scale, hexSize, config)
     return () => {}
   }
 
@@ -3522,7 +3336,14 @@ export function updateCurrentSector(
   }
 
   if (!currentCameraState || config.bypass_animation) {
-    renderWithCameraState(canvas, { ...props, config: newConfig }, targetCameraState)
+    renderWithCameraStateAndInteraction(
+      canvas,
+      { ...props, config: newConfig },
+      targetCameraState,
+      null,
+      null,
+      1
+    )
     return () => {}
   }
 
@@ -3572,7 +3393,14 @@ export function updateCurrentSector(
       fadeProgress
     )
 
-    renderWithCameraState(canvas, { ...props, config: newConfig }, interpolatedCamera)
+    renderWithCameraStateAndInteraction(
+      canvas,
+      { ...props, config: newConfig },
+      interpolatedCamera,
+      null,
+      null,
+      1
+    )
 
     if (fadeProgress < 1) {
       animationState.animationFrameId = requestAnimationFrame(animate)

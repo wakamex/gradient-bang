@@ -1,15 +1,23 @@
+const CACHE_VERSION_KEY = "gb_cached_version"
+
 export const checkAssetsAreCached = (): boolean => {
-  console.debug("[GAME CACHE] Checking SW state:", {
-    hasServiceWorker: "serviceWorker" in navigator,
-    controller: navigator.serviceWorker?.controller,
-    ready: navigator.serviceWorker?.ready,
-  });
+  const hasController = !!navigator.serviceWorker?.controller
+  const cachedVersion = localStorage.getItem(CACHE_VERSION_KEY)
+  const currentVersion = import.meta.env.VITE_APP_VERSION
 
-  if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
-    console.debug("[GAME CACHE] Service worker active, cache ready");
-    return true;
-  }
+  console.log("[GAME CACHE] SW state:", {
+    hasController,
+    cachedVersion,
+    currentVersion,
+    match: cachedVersion === currentVersion,
+  })
 
-  console.debug("[GAME CACHE] No active service worker, cache not ready");
-  return false;
-};
+  // Both conditions required:
+  // 1. A SW is controlling (assets are being served from cache)
+  // 2. The cached version matches the current build (correct assets)
+  return hasController && cachedVersion === currentVersion
+}
+
+export const markAssetsCached = (): void => {
+  localStorage.setItem(CACHE_VERSION_KEY, import.meta.env.VITE_APP_VERSION)
+}

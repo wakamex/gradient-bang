@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react"
+import { lazy, Suspense, useCallback, useState } from "react"
 
 import { AnimatePresence, motion } from "motion/react"
 import { useMediaQuery } from "@uidotdev/usehooks"
@@ -8,45 +8,44 @@ import { useGameContext } from "@/hooks/useGameContext"
 import useGameStore from "@/stores/game"
 import { checkAssetsAreCached } from "@/utils/cache"
 import { Error } from "@/views/Error"
-import { Game } from "@/views/Game"
 import { JoinStatus } from "@/views/JoinStatus"
 import { Preload } from "@/views/Preload"
 import { Title } from "@/views/Title"
 
+const Game = lazy(() => import("@/views/Game"))
+
 export const ViewContainer = ({ error }: { error?: string | null }) => {
-  const settings = useGameStore.use.settings()
   const gameState = useGameStore.use.gameState()
   const { initialize } = useGameContext()
-  const [viewState, setViewState] = useState<"title" | "preload" | "game">(
-    settings.bypassTitle ? "game" : "preload"
-  )
+  const [viewState, setViewState] = useState<"title" | "preload" | "game">(() => {
+    if (checkAssetsAreCached()) {
+      console.log(
+        "%c[GAME] Assets already cached, skipping preload screen",
+        "background: #90EE90; color: #006400; font-weight: bold"
+      )
+      return "title"
+    }
+    return "preload"
+  })
 
   const isSmallDevice = useMediaQuery("only screen and (max-width : 768px)")
 
-  const handleViewStateChange = useCallback(
-    (state: "title" | "preload" | "game") => {
-      if (settings.bypassAssetCache) {
+  const handleViewStateChange = useCallback((state: "title" | "preload" | "game") => {
+    // If transitioning to preload, check if assets are already cached
+    if (state === "preload") {
+      const cached = checkAssetsAreCached()
+
+      if (cached) {
+        console.log("[GAME] Assets already cached, skipping preload screen")
         setViewState("game")
         return
       }
 
-      // If transitioning to preload, check if assets are already cached
-      if (state === "preload") {
-        const cached = checkAssetsAreCached()
+      console.log("[GAME] Cache incomplete, showing preload screen")
+    }
 
-        if (cached) {
-          console.log("[GAME] Assets already cached, skipping preload screen")
-          setViewState("game")
-          return
-        }
-
-        console.log("[GAME] Cache incomplete, showing preload screen")
-      }
-
-      setViewState(state)
-    },
-    [settings.bypassAssetCache]
-  )
+    setViewState(state)
+  }, [])
 
   if (error || gameState === "error") {
     return <Error>{error}</Error>
@@ -82,9 +81,11 @@ export const ViewContainer = ({ error }: { error?: string | null }) => {
                 </motion.div>
               )}
             </AnimatePresence>
-            {isSmallDevice ?
-              <Mobile />
-            : <Game />}
+            <Suspense fallback={null}>
+              {isSmallDevice ?
+                <Mobile />
+              : <Game />}
+            </Suspense>
           </>
         )}
       </motion.div>

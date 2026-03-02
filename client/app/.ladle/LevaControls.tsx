@@ -16,7 +16,6 @@ import { useQuestControls } from ".ladle/useQuestControls"
 
 import { SHIP_DEFINITIONS } from "@/types/ships"
 import { INCOMING_CHAT_TOOL_CALL_MOCK } from "@/mocks/chat.mock"
-import { LEADERBOARD_DATA_MOCK } from "@/mocks/misc.mock"
 import {
   createRandomCorporation,
   createRandomPlayer,
@@ -106,8 +105,9 @@ export const LevaControls = ({
         ["TEST: Destroy Corp Ship"]: button((get) => {
           const filter = (get("Ships.Target Ship") as string).toLowerCase().trim()
           const ships = useGameStore.getState().ships.data ?? []
-          const corpShip = filter
-            ? ships.find(
+          const corpShip =
+            filter ?
+              ships.find(
                 (s) =>
                   s.owner_type === "corporation" &&
                   !s.destroyed_at &&
