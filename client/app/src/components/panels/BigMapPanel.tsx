@@ -33,7 +33,7 @@ const MAP_CONFIG: MapConfig = {
   show_port_labels: true,
   uiStyles: {
     background: {
-      color: "rgba(0,0,0,0.90)",
+      color: "rgba(0,0,0,0.95)",
     },
     edgeFeather: {
       size: 140,
