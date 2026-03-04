@@ -22,6 +22,7 @@ const TaskTypeBadge = ({ type }: { type: Task["type"] }) => {
         : type === "COMPLETE" ? "border border-success bg-success-background text-success"
         : type === "CANCELLED" ? "border border-warning bg-warning-background text-warning"
         : type === "FINISHED" ? "bg-success-background text-success-foreground"
+        : type === "ERROR" ? "bg-destructive-background text-destructive-foreground"
         : "bg-foreground text-background"
       )}
     >
@@ -50,27 +51,32 @@ const formatTaskSummary = (summary: string) => {
   return cleaned
 }
 
-const TaskRow = memo(
-  ({ task, className }: { task: TaskOutput; className?: string }) => {
-    return (
-      <div
-        className={cn(
-          "flex flex-row gap-4 w-full border-b border-muted last:border-b-0 py-2 last:pb-0 text-[10px] select-none",
-          className
-        )}
-      >
-        <div className="flex flex-row gap-3">
-          <div className="w-16">
-            <TaskTypeBadge type={task.task_message_type.toUpperCase() as TaskType} />
-          </div>
-          <div className="normal-case flex-1">
-            {formatTaskSummary(task.task_message_type === "FAILED" ? "Task cancelled" : task.text)}
-          </div>
+const TaskRow = memo(({ task, className }: { task: TaskOutput; className?: string }) => {
+  return (
+    <div
+      className={cn(
+        "flex flex-row gap-4 w-full border-b border-muted last:border-b-0 py-2 last:pb-0 text-[10px] select-none",
+        task.task_message_type === "ERROR" && "border-l-2 border-l-destructive pl-2",
+        className
+      )}
+    >
+      <div className="flex flex-row gap-3">
+        <div className="w-16">
+          <TaskTypeBadge type={task.task_message_type.toUpperCase() as TaskType} />
+        </div>
+        <div
+          className={cn(
+            "normal-case flex-1 text-pretty",
+            task.task_message_type === "ERROR" && "text-destructive-foreground",
+            task.task_message_type === "STEP" && "text-accent-foreground"
+          )}
+        >
+          {formatTaskSummary(task.task_message_type === "FAILED" ? "Task cancelled" : task.text)}
         </div>
       </div>
-    )
-  }
-)
+    </div>
+  )
+})
 
 export const TaskOutputStreamComponent = ({
   tasks,
