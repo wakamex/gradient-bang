@@ -331,6 +331,18 @@ class TaskAgent:
             Tuple[str, Callable[[Dict[str, Any]], Awaitable[None]]]
         ] = []
 
+        is_corp_ship = getattr(game_client, "entity_type", None) == "corporation_ship"
+
+        # Player-only tools that corp ships cannot use
+        player_only_tools = [
+            CreateCorporation,
+            JoinCorporation,
+            LeaveCorporation,
+            KickCorporationMember,
+            SellShip,
+            BankWithdraw,
+        ]
+
         tools = tools_list or [
             MyStatus,
             PlotCourse,
@@ -347,17 +359,11 @@ class TaskAgent:
             CollectFighters,
             EventQuery,
             PurchaseFighters,
-            CreateCorporation,
-            JoinCorporation,
-            LeaveCorporation,
-            KickCorporationMember,
             CorporationInfo,
             ShipDefinitions,
             PurchaseShip,
-            SellShip,
             RenameShip,
             BankDeposit,
-            BankWithdraw,
             TransferCredits,
             DumpCargo,
             CombatInitiate,
@@ -365,6 +371,7 @@ class TaskAgent:
             LoadGameInfo,
             (WaitInIdleState, {"agent": self}),
             TaskFinished,
+            *([] if is_corp_ship else player_only_tools),
         ]
         self.set_tools(tools)
 
@@ -1034,6 +1041,18 @@ class TaskAgent:
                     self._emit_error_and_finish(
                         f"Pipeline error: {error}", exception_detail=str(error)
                     )
+                    if self._task_id and not self._finish_emitted:
+                        try:
+                            await self.game_client.task_lifecycle(
+                                task_id=self._task_id,
+                                event_type="finish",
+                                task_summary=f"Pipeline error: {error}",
+                                task_status="failed",
+                                task_metadata=self._task_metadata,
+                            )
+                            self._finish_emitted = True
+                        except Exception as exc:
+                            logger.warning(f"Failed to emit task.finish (pipeline error): {exc}")
                     return False
 
                 if self.finished:
@@ -1312,11 +1331,6 @@ class TaskAgent:
         is_async_tool = expected_completion_event is not None
 
         if is_async_tool:
-            # For async tools, put a placeholder result into context - actual data comes via events
-            tool_result = {"status": "Executed."}
-            properties = FunctionCallResultProperties(run_llm=False)
-            await params.result_callback(tool_result, properties=properties)
-
             # Pre-set awaiting flag for async completion tools BEFORE any yield points.
             # This prevents race conditions where events arrive between tool completion
             # and _on_tool_call_completed setting the flag.
@@ -1371,10 +1385,8 @@ class TaskAgent:
             self._tool_call_in_progress = False
 
         if error_payload is not None:
-            if not is_async_tool:
-                # For sync tools with errors, put error result into context
-                properties = FunctionCallResultProperties(run_llm=False)
-                await params.result_callback(error_payload, properties=properties)
+            properties = FunctionCallResultProperties(run_llm=False)
+            await params.result_callback(error_payload, properties=properties)
             logger.debug(
                 "TOOL_RESULT error tool={} arguments={} payload={}",
                 tool_name,
@@ -1384,10 +1396,9 @@ class TaskAgent:
             await self._on_tool_call_completed(tool_name, error_payload)
             return
 
-        if not is_async_tool:
-            # For sync tools, put actual result into context so LLM sees the data
-            properties = FunctionCallResultProperties(run_llm=False)
-            await params.result_callback(result_payload, properties=properties)
+        # Put actual result into context so LLM always sees real data
+        properties = FunctionCallResultProperties(run_llm=False)
+        await params.result_callback(result_payload, properties=properties)
 
         logger.debug(
             "TOOL_RESULT tool={} arguments={} result={}",
