@@ -8,7 +8,7 @@ import { BaseDialog } from "./BaseDialog"
 export const CharacterSelectDialog = ({
   onCharacterSelect,
 }: {
-  onCharacterSelect: (characterId: string) => void
+  onCharacterSelect: (characterId: string, isNewCharacter: boolean) => void
 }) => {
   const [isCreatingNewCharacter, setIsCreatingNewCharacter] = useState(false)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -42,11 +42,11 @@ export const CharacterSelectDialog = ({
           <CreateCharacter
             onCancel={() => setIsCreatingNewCharacter(false)}
             onCharacterCreate={(characterId) => {
-              onCharacterSelect(characterId)
+              onCharacterSelect(characterId, true)
             }}
           />
         : <CharacterSelectComponent
-            onCharacterSelect={onCharacterSelect}
+            onCharacterSelect={(characterId) => onCharacterSelect(characterId, false)}
             onIsCreating={() => setIsCreatingNewCharacter(true)}
           />
         }

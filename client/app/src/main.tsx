@@ -140,13 +140,14 @@ createRoot(document.getElementById("root")!).render(
           Gradient Bang is currently undergoing maintenance. Please check back soon.
         </p>
       </div>
-    : isFirefox ?
-      <Error noButton title="Firefox Not Support">
-        We're sorry, your browser is not currently supported. Gradient Bang relies on advanced web
-        technologies that are best supported in Chromium-based browsers like Chrome and Edge, or
-        Safari on macOS. Please switch to a supported browser for the best experience.
-      </Error>
     : <>
+        {isFirefox && (
+          <Error title="Firefox Detected" buttonLabel="Understood, proceed anyway">
+            Firefox is not recommended due to WebRTC compatibility issues and limited testing. For
+            the best experience, please use a Chromium-based browser like Chrome, or Safari on
+            macOS.
+          </Error>
+        )}
         <Suspense fallback={<SuspenseLoader />}>
           <App />
         </Suspense>

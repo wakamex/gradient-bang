@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { deepmerge } from "deepmerge-ts"
+import { motion } from "motion/react"
 import { XIcon } from "@phosphor-icons/react"
 
 import PlanetLoader from "@/assets/videos/planet-loader.mp4"
@@ -147,6 +148,7 @@ export const BigMapPanel = ({ config }: { config?: MapConfig }) => {
   const [isFetching, setIsFetching] = useState(false)
 
   const initialFetchRef = useRef(false)
+  const [hadMapDataOnMount] = useState(() => mapData !== undefined)
 
   const coursePlotZoomEnabled = useGameStore((state) => state.coursePlotZoomEnabled)
 
@@ -157,7 +159,11 @@ export const BigMapPanel = ({ config }: { config?: MapConfig }) => {
 
   const shipSectors = ships?.data
     ?.filter((s: ShipSelf) => s.owner_type !== "personal")
-    .map((s: ShipSelf) => s.sector ?? 0)
+    .map((s: ShipSelf) => ({
+      sector: s.sector ?? 0,
+      ship_name: s.ship_name,
+      ship_type: s.ship_type,
+    }))
 
   // Initial fetch of map data
   useEffect(() => {
@@ -245,7 +251,12 @@ export const BigMapPanel = ({ config }: { config?: MapConfig }) => {
         )}
 
         {mapData ?
-          <div className="absolute inset-0">
+          <motion.div
+            className="absolute inset-0"
+            initial={{ opacity: hadMapDataOnMount ? 1 : 0, scale: hadMapDataOnMount ? 1 : 0.97 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: hadMapDataOnMount ? 0 : 2, delay: hadMapDataOnMount ? 0 : 1 }}
+          >
             <SectorMap
               center_sector_id={mapCenterSector ?? sector?.id}
               current_sector_id={sector ? sector.id : undefined}
@@ -268,7 +279,7 @@ export const BigMapPanel = ({ config }: { config?: MapConfig }) => {
               mapFitEpoch={mapFitEpoch}
               mapResetEpoch={mapResetEpoch}
             />
-          </div>
+          </motion.div>
         : <div className="relative w-full h-full flex items-center justify-center cross-lines-white/50 cross-lines-offset-12">
             <div className="elbow relative z-99 flex flex-col gap-3 bg-black border border-border p-6 animate-in fade-in-0 duration-300">
               <video

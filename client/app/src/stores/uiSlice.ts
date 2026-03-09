@@ -60,7 +60,7 @@ export interface UISlice {
 
 export const createUISlice: StateCreator<UISlice> = (set, get) => ({
   uiState: "idle",
-  uiMode: getLocalSettings()?.defaultUIMode ?? "tasks",
+  uiMode: getLocalSettings()?.defaultUIMode ?? "map",
   activeScreen: undefined,
   activeModal: undefined,
   activePanel: "logs",

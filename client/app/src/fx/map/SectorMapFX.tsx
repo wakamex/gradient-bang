@@ -402,8 +402,8 @@ export const DEFAULT_LABEL_STYLES: LabelStyles = {
     mutedOpacity: 0.3,
   },
   shipCount: {
-    textColor: "#ffffff",
-    backgroundColor: "#0284c7",
+    textColor: "#000000",
+    backgroundColor: "#53eafd",
     padding: 2,
     fontSize: 11,
     hoveredFontSize: 13,
@@ -510,7 +510,7 @@ export interface SectorMapProps {
   config: SectorMapConfigBase
   maxDistance?: number
   coursePlot?: CoursePlot | null
-  ships?: Map<number, number>
+  ships?: Map<number, Array<{ ship_name: string; ship_type: string }>>
 }
 
 export interface CameraState {
@@ -1951,7 +1951,28 @@ function renderPortLabels(
   ctx.restore()
 }
 
-/** Render ship count labels at top-left of hexes */
+/** Truncate text to fit within maxWidth, adding ellipsis if needed */
+function truncateText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
+  if (ctx.measureText(text).width <= maxWidth) return text
+  const ellipsis = "\u2026"
+  const ellipsisWidth = ctx.measureText(ellipsis).width
+  const targetWidth = maxWidth - ellipsisWidth
+  let lo = 0
+  let hi = text.length
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (ctx.measureText(text.slice(0, mid)).width <= targetWidth) {
+      lo = mid
+    } else {
+      hi = mid - 1
+    }
+  }
+  return text.slice(0, lo) + ellipsis
+}
+
+type ShipInfo = { ship_name: string; ship_type: string }
+
+/** Render ship count labels at top-left of hexes (compact badges only, skips hovered) */
 function renderShipLabels(
   ctx: CanvasRenderingContext2D,
   data: MapData,
@@ -1961,7 +1982,7 @@ function renderShipLabels(
   height: number,
   cameraState: CameraState,
   config: SectorMapConfigBase,
-  ships: Map<number, number> | undefined,
+  ships: Map<number, ShipInfo[]> | undefined,
   hoveredSectorId: number | null = null
 ) {
   if (!ships || ships.size === 0) return
@@ -1979,11 +2000,13 @@ function renderShipLabels(
   ctx.font = `${labelStyle.fontWeight} ${labelStyle.fontSize}px ${getCanvasFontFamily(ctx)}`
 
   data.forEach((node) => {
-    const shipCount = ships.get(node.id)
-    if (shipCount === undefined) return
+    const shipList = ships.get(node.id)
+    if (!shipList || shipList.length === 0) return
 
-    const isHovered = node.id === hoveredSectorId
-    const hoverScale = isHovered ? labelStyle.hoveredFontSize / labelStyle.fontSize : 1
+    // Skip hovered sector — rendered by renderShipTooltip on top
+    if (node.id === hoveredSectorId) return
+
+    const shipCount = shipList.length
 
     // Position at top-left of hex (angle 2*PI/3 = 120 degrees)
     const worldPos = hexToWorld(node.position[0], node.position[1], scale)
@@ -1993,7 +2016,6 @@ function renderShipLabels(
 
     const screenPos = worldToScreen(edgeWorldX, edgeWorldY, width, height, cameraState)
 
-    // Labels are hidden during course plot (early return above), so always full opacity here
     const labelOpacity = 1
 
     // Calculate text metrics
@@ -2017,7 +2039,6 @@ function renderShipLabels(
 
     ctx.save()
     ctx.translate(labelX, labelY)
-    ctx.scale(hoverScale, hoverScale)
 
     // Draw background (offset to left from anchor)
     ctx.fillStyle = applyAlpha(labelStyle.backgroundColor, labelOpacity)
@@ -2041,6 +2062,138 @@ function renderShipLabels(
     ctx.fillStyle = applyAlpha(labelStyle.textColor, labelOpacity)
     ctx.fillText(text, -textWidth, 0)
     ctx.restore()
+  })
+
+  ctx.restore()
+}
+
+/** Render expanded ship tooltip for the hovered sector */
+function renderShipTooltip(
+  ctx: CanvasRenderingContext2D,
+  data: MapData,
+  scale: number,
+  hexSize: number,
+  width: number,
+  height: number,
+  cameraState: CameraState,
+  config: SectorMapConfigBase,
+  ships: Map<number, ShipInfo[]> | undefined,
+  hoveredSectorId: number | null = null
+) {
+  if (!ships || ships.size === 0 || hoveredSectorId === null) return
+
+  const shipList = ships.get(hoveredSectorId)
+  if (!shipList || shipList.length === 0) return
+
+  const hoveredNode = data.find((n) => n.id === hoveredSectorId)
+  if (!hoveredNode) return
+
+  const labelStyle = config.labelStyles.shipCount
+  const fontSize = 10
+  const iconSize = 12
+  const iconGap = 4
+  const maxNameWidth = 110
+  const rowHeight = fontSize + 6
+  const padding = 7
+  const arrowSize = 6
+  const borderColor = labelStyle.backgroundColor
+  const bgColor = "rgba(0,0,0,0.92)"
+  const textColor = "#ffffff"
+  const labelOffset = config.sector_label_offset ?? 2
+
+  // Anchor point: top-left hex edge
+  const worldPos = hexToWorld(hoveredNode.position[0], hoveredNode.position[1], scale)
+  const angle = (2 * Math.PI) / 3
+  const edgeWorldX = worldPos.x + hexSize * Math.cos(angle)
+  const edgeWorldY = worldPos.y + hexSize * Math.sin(angle)
+  const anchorPos = worldToScreen(edgeWorldX, edgeWorldY, width, height, cameraState)
+
+  const anchorX = anchorPos.x - labelOffset
+  const anchorY = anchorPos.y
+
+  ctx.save()
+  ctx.font = `${labelStyle.fontWeight} ${fontSize}px ${getCanvasFontFamily(ctx)}`
+  ctx.textAlign = "left"
+  ctx.textBaseline = "alphabetic"
+
+  // Measure actual max text width needed (uppercase)
+  let measuredMaxWidth = 0
+  for (const ship of shipList) {
+    const w = ctx.measureText(ship.ship_name.toUpperCase()).width
+    measuredMaxWidth = Math.max(measuredMaxWidth, Math.min(w, maxNameWidth))
+  }
+
+  const tooltipWidth = padding * 2 + iconSize + iconGap + measuredMaxWidth
+  const tooltipHeight = padding * 2 + shipList.length * rowHeight - 2
+
+  // Position tooltip: to the left of anchor, arrow on right-middle side pointing to anchor
+  let boxX = anchorX - tooltipWidth - arrowSize
+  let boxY = anchorY - tooltipHeight / 2
+
+  // Clamp to canvas bounds
+  if (boxX < 4) boxX = 4
+  if (boxY < 4) boxY = 4
+  if (boxY + tooltipHeight > height - 4) boxY = height - 4 - tooltipHeight
+
+  // Arrow tip points at anchor, base on right edge of box
+  const arrowBaseX = boxX + tooltipWidth
+  const arrowTipX = arrowBaseX + arrowSize
+  // Keep arrow vertically centered on anchor but clamped to box edges
+  let arrowMidY = anchorY
+  arrowMidY = Math.max(arrowMidY, boxY + arrowSize)
+  arrowMidY = Math.min(arrowMidY, boxY + tooltipHeight - arrowSize)
+
+  // Draw tooltip background (sharp corners)
+  ctx.fillStyle = bgColor
+  ctx.beginPath()
+  ctx.rect(boxX, boxY, tooltipWidth, tooltipHeight)
+  ctx.fill()
+
+  // Draw border
+  ctx.strokeStyle = borderColor
+  ctx.lineWidth = 1
+  ctx.stroke()
+
+  // Draw arrow on right-middle side
+  ctx.beginPath()
+  ctx.moveTo(arrowTipX, arrowMidY)
+  ctx.lineTo(arrowBaseX, arrowMidY - arrowSize)
+  ctx.lineTo(arrowBaseX, arrowMidY + arrowSize)
+  ctx.closePath()
+  ctx.fillStyle = bgColor
+  ctx.fill()
+  ctx.strokeStyle = borderColor
+  ctx.lineWidth = 1
+  ctx.stroke()
+
+  // Erase the border line where arrow meets box
+  ctx.save()
+  ctx.beginPath()
+  ctx.moveTo(arrowBaseX, arrowMidY - arrowSize + 1)
+  ctx.lineTo(arrowBaseX, arrowMidY + arrowSize - 1)
+  ctx.strokeStyle = bgColor
+  ctx.lineWidth = 2
+  ctx.stroke()
+  ctx.restore()
+
+  // Draw each ship row
+  shipList.forEach((ship, index) => {
+    const rowY = boxY + padding + index * rowHeight + fontSize
+    const rowX = boxX + padding
+
+    // Draw ship icon
+    ctx.save()
+    ctx.translate(rowX, rowY - fontSize + (rowHeight - iconSize) / 2)
+    const iScale = iconSize / SHIP_ICON_VIEWBOX
+    ctx.scale(iScale, iScale)
+    ctx.fillStyle = textColor
+    ctx.fill(shipPath)
+    ctx.restore()
+
+    // Draw truncated ship name
+    const displayName = truncateText(ctx, ship.ship_name.toUpperCase(), measuredMaxWidth)
+    ctx.fillStyle = textColor
+    ctx.fillText(displayName, rowX + iconSize + iconGap, rowY)
   })
 
   ctx.restore()
@@ -2319,6 +2472,18 @@ function renderWithCameraStateAndInteraction(
     height,
     cameraState,
     config,
+    hoveredSectorId
+  )
+  renderShipTooltip(
+    ctx,
+    cameraState.filteredData,
+    scale,
+    hexSize,
+    width,
+    height,
+    cameraState,
+    config,
+    ships,
     hoveredSectorId
   )
 }

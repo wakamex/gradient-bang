@@ -44,7 +44,11 @@ export const MiniMapPanel = ({ className }: { className?: string }) => {
   const coursePlot = useGameStore.use.course_plot?.()
   const shipSectors = ships?.data
     ?.filter((s: ShipSelf) => s.owner_type !== "personal")
-    .map((s: ShipSelf) => s.sector ?? 0)
+    .map((s: ShipSelf) => ({
+      sector: s.sector ?? 0,
+      ship_name: s.ship_name,
+      ship_type: s.ship_type,
+    }))
 
   const hasRouteHighlight = Boolean(coursePlot?.path && coursePlot.path.length > 1)
   const hopsRemaining = useMemo(

@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "motion/react"
 
 import TitleVideo from "@/assets/videos/title.mp4"
 import { CharacterSelectDialog } from "@/components/dialogs/CharacterSelect"
+import { IntroTutorial } from "@/components/dialogs/IntroTutorial"
 import { Leaderboard } from "@/components/dialogs/Leaderboard"
 import { Settings } from "@/components/dialogs/Settings"
 import PipecatSVG from "@/components/PipecatSVG"
@@ -83,7 +84,7 @@ export const Title = ({ onViewNext }: { onViewNext: () => void }) => {
         >
           <CardHeader className="block">
             <h1 className="text-white text-3xl font-bold uppercase">
-              <ScrambleText>Gradient Bang Playtest</ScrambleText>
+              <ScrambleText>Gradient Bang</ScrambleText>
             </h1>
           </CardHeader>
           <Separator />
@@ -224,11 +225,16 @@ export const Title = ({ onViewNext }: { onViewNext: () => void }) => {
       <Settings />
       <Leaderboard />
       <CharacterSelectDialog
-        onCharacterSelect={(characterId) => {
+        onCharacterSelect={(characterId, isNewCharacter) => {
           setCharacterId(characterId)
-          onViewNext()
+          if (isNewCharacter) {
+            setActiveModal("intro_tutorial")
+          } else {
+            onViewNext()
+          }
         }}
       />
+      <IntroTutorial onContinue={onViewNext} />
       <div className="absolute bottom-0 right-0 p-4 z-99 flex flex-row items-center gap-2 bg-background select-none">
         <span className="text-xs text-muted-foreground uppercase tracking-wider">Built by</span>
         <PipecatSVG className="h-[16px] text-white" />

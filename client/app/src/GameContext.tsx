@@ -378,6 +378,10 @@ export function GameProvider({ children }: GameProviderProps) {
                 !!eventPlayerId && eventPlayerId === useGameStore.getState().playerSessionId
 
               if (isLocalSector && !isLocalPlayer) {
+                const displayName =
+                  data.player?.player_type === "corporation_ship" && data.ship?.ship_name ?
+                    data.ship.ship_name
+                  : data.player.name
                 if (data.movement === "arrive") {
                   console.debug("[GAME EVENT] Adding player to sector", e.payload)
                   const sectorPlayer: Player = {
@@ -387,7 +391,7 @@ export function GameProvider({ children }: GameProviderProps) {
                   useGameStore.getState().addSectorPlayer(sectorPlayer)
                   useGameStore.getState().addActivityLogEntry({
                     type: "character.moved",
-                    message: `[${data.player.name}] arrived in sector`,
+                    message: `[${displayName}] arrived in sector`,
                     meta: {
                       player: data.player,
                       ship: data.ship,
@@ -401,7 +405,7 @@ export function GameProvider({ children }: GameProviderProps) {
                   useGameStore.getState().removeSectorPlayer(data.player)
                   useGameStore.getState().addActivityLogEntry({
                     type: "character.moved",
-                    message: `[${data.player.name}] departed from sector`,
+                    message: `[${displayName}] departed from sector`,
                     meta: {
                       player: data.player,
                       ship: data.ship,

@@ -59,7 +59,7 @@ interface MapProps {
   maxDistance?: number
   showLegend?: boolean
   coursePlot?: CoursePlot | null
-  ships?: number[]
+  ships?: Array<{ sector: number; ship_name: string; ship_type: string }>
   onNodeClick?: (node: MapSectorNode | null) => void
   onNodeEnter?: (node: MapSectorNode) => void
   onNodeExit?: (node: MapSectorNode) => void
@@ -139,13 +139,15 @@ const MapComponent = ({
   // Normalize map_data to always be an array (memoized to avoid dependency changes)
   const normalizedMapData = useMemo(() => map_data ?? [], [map_data])
 
-  // Stabilize ships data - convert flat array to Map<sectorId, count>
-  const shipsKey = ships?.join(",") ?? ""
+  // Stabilize ships data - convert flat array to Map<sectorId, shipInfo[]>
+  const shipsKey = ships?.map((s) => `${s.sector}:${s.ship_name}`).join(",") ?? ""
   const shipsMap = useMemo(() => {
     if (!ships || ships.length === 0) return undefined
-    const map = new Map<number, number>()
-    for (const sectorId of ships) {
-      map.set(sectorId, (map.get(sectorId) ?? 0) + 1)
+    const map = new Map<number, Array<{ ship_name: string; ship_type: string }>>()
+    for (const ship of ships) {
+      const existing = map.get(ship.sector) ?? []
+      existing.push({ ship_name: ship.ship_name, ship_type: ship.ship_type })
+      map.set(ship.sector, existing)
     }
     return map
   }, [ships])
@@ -606,9 +608,11 @@ const areMapPropsEqual = (prevProps: MapProps, nextProps: MapProps): boolean => 
   if (prevProps.map_data !== nextProps.map_data) return false
   if (prevProps.coursePlot !== nextProps.coursePlot) return false
 
-  // Ships - use join for fast string comparison
+  // Ships - use serialized key for comparison
   if (prevProps.ships !== nextProps.ships) {
-    if ((prevProps.ships?.join(",") ?? "") !== (nextProps.ships?.join(",") ?? "")) {
+    const prevKey = prevProps.ships?.map((s) => `${s.sector}:${s.ship_name}`).join(",") ?? ""
+    const nextKey = nextProps.ships?.map((s) => `${s.sector}:${s.ship_name}`).join(",") ?? ""
+    if (prevKey !== nextKey) {
       return false
     }
   }

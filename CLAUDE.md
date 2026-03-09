@@ -26,12 +26,6 @@ Most important code in this repo:
 - Start the bot:
   - `set -a && source .env.supabase && set +a && uv run bot --host 0.0.0.0`
 
-## Testing the web client
-
-- Open a browser and load http://localhost:5173/
-- Sign in as kwindla@gmail.com with password secret123
-- Use the player JOETRADER
-
 ## Critical: Read-only directories
 
 - `pipecat-core-source/` is READ ONLY reference code. It is NOT loaded as a dependency. NEVER modify files in this directory. Use it only to understand pipecat internals.

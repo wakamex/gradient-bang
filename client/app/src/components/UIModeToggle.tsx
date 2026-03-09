@@ -9,6 +9,7 @@ export const UIModeToggle = () => {
   const uiMode = useGameStore.use.uiMode()
   const setUIMode = useGameStore.use.setUIMode()
   const setLookMode = useGameStore.use.setLookMode?.()
+  const settings = useGameStore.use.settings()
 
   const handleClick = () => {
     setUIMode(uiMode === "tasks" ? "map" : "tasks")
@@ -32,19 +33,21 @@ export const UIModeToggle = () => {
         </TooltipContent>
       </Tooltip>
 
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            variant="bland"
-            size="icon-sm"
-            onClick={() => setLookMode(true)}
-            className="shrink-0 bg-subtle-background focus-visible:outline-0 hover:text-terminal hover:bg-accent-background focus-visible:bg-background"
-          >
-            <SphereIcon size={20} className="size-5" />
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent side="left">Look around</TooltipContent>
-      </Tooltip>
+      {settings.renderStarfield && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="bland"
+              size="icon-sm"
+              onClick={() => setLookMode(true)}
+              className="shrink-0 bg-subtle-background focus-visible:outline-0 hover:text-terminal hover:bg-accent-background focus-visible:bg-background"
+            >
+              <SphereIcon size={20} className="size-5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="left">Look around</TooltipContent>
+        </Tooltip>
+      )}
     </div>
   )
 }

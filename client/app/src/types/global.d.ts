@@ -264,6 +264,7 @@ declare global {
     | "quest_codec"
     | "quest_list"
     | "ship_details"
+    | "intro_tutorial"
 
   // --- COMBAT
 
