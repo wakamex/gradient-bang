@@ -36,7 +36,9 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi import (
+    RTVIFunctionCallReportLevel,
     RTVIObserver,
+    RTVIObserverParams,
     RTVIProcessor,
     RTVIServerMessageFrame,
 )
@@ -300,19 +302,6 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
         llm,
     ) = await bot_startup(character_id_hint, character_name_hint, server_url)
 
-    @llm.event_handler("on_function_calls_started")
-    async def on_function_calls_started(service, function_calls):
-        for call in function_calls:
-            await rtvi.push_frame(
-                RTVIServerMessageFrame(
-                    {
-                        "frame_type": "event",
-                        "event": "llm.function_call",
-                        "payload": {"name": call.function_name},
-                    }
-                )
-            )
-
     token_usage_metrics = TokenUsageMetricsProcessor(source="bot")
 
     # System prompt
@@ -465,6 +454,11 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
             enable_usage_metrics=True,
         ),
         rtvi_processor=rtvi,
+        rtvi_observer_params=RTVIObserverParams(
+            function_call_report_level={
+                "*": RTVIFunctionCallReportLevel.FULL,
+            },
+        ),
         cancel_on_idle_timeout=False,
         idle_timeout_secs=600,
         idle_timeout_frames=(BotSpeakingFrame, UserSpeakingFrame, TaskActivityFrame),
