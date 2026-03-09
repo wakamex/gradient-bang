@@ -68,6 +68,9 @@ export const ConversationProvider = ({ children }: React.PropsWithChildren) => {
     clearTimeout(botStoppedSpeakingTimeoutRef.current)
     botStoppedSpeakingTimeoutRef.current = undefined
     botOutputLastChunkRef.current = { spoken: "", unspoken: "" }
+
+    // Set initial thinking state before first speech
+    useConversationStore.getState().setIsThinking(true)
   })
 
   // Helper to ensure assistant message exists
@@ -153,6 +156,7 @@ export const ConversationProvider = ({ children }: React.PropsWithChildren) => {
     // Bot is speaking again; reset the finalize timer (bot was just pausing).
     clearTimeout(botStoppedSpeakingTimeoutRef.current)
     botStoppedSpeakingTimeoutRef.current = undefined
+    useConversationStore.getState().setIsThinking(false)
   })
 
   useRTVIClientEvent(RTVIEvent.UserStartedSpeaking, () => {
@@ -203,12 +207,10 @@ export const ConversationProvider = ({ children }: React.PropsWithChildren) => {
 
   // LLM Function Call lifecycle events
   useRTVIClientEvent(RTVIEvent.LLMFunctionCallStarted, (data: LLMFunctionCallStartedData) => {
-    console.log("PEW", data)
     handleFunctionCallStarted({ function_name: data.function_name })
   })
 
   useRTVIClientEvent(RTVIEvent.LLMFunctionCallInProgress, (data: LLMFunctionCallInProgressData) => {
-    console.log("PEW 2", data)
     handleFunctionCallInProgress({
       function_name: data.function_name,
       tool_call_id: data.tool_call_id,

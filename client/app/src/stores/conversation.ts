@@ -578,7 +578,7 @@ export const useConversationStore = create<ConversationState>()((set, get) => ({
       const updatedMessages = [...state.messages, message]
       const processedMessages = normalizeMessagesForUI(updatedMessages)
       callAllMessageCallbacks(state.messageCallbacks, message)
-      return { messages: processedMessages }
+      return { messages: processedMessages, isThinking: true }
     })
   },
 

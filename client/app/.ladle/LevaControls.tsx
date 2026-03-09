@@ -16,7 +16,6 @@ import { useLeaderboardControls } from ".ladle/useLeaderboardControls"
 import { useQuestControls } from ".ladle/useQuestControls"
 
 import { SHIP_DEFINITIONS } from "@/types/ships"
-import { INCOMING_CHAT_TOOL_CALL_MOCK } from "@/mocks/chat.mock"
 import {
   createRandomCorporation,
   createRandomPlayer,
@@ -41,7 +40,6 @@ export const LevaControls = ({
   const dispatchAction = useGameStore.use.dispatchAction()
   const addToast = useGameStore.use.addToast()
   const setSector = useGameStore.use.setSector()
-  const addChatMessage = useGameStore.use.addChatMessage()
   const addSectorPlayer = useGameStore.use.addSectorPlayer()
   const removeSectorPlayer = useGameStore.use.removeSectorPlayer()
   const addActivityLogEntry = useGameStore.use.addActivityLogEntry()
@@ -139,10 +137,6 @@ export const LevaControls = ({
               },
             ],
           })
-        }),
-        ["Add Incoming Tool Call"]: button(() => {
-          const state = useGameStore.getState()
-          state.addToolCallMessage(INCOMING_CHAT_TOOL_CALL_MOCK.name)
         }),
         ["Set LLM Is Working"]: button(() => {
           useConversationStore.getState().setIsThinking(true)

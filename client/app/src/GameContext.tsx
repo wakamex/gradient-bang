@@ -4,6 +4,7 @@ import { RTVIEvent } from "@pipecat-ai/client-js"
 import { usePipecatClient, useRTVIClientEvent } from "@pipecat-ai/client-react"
 
 import { GameContext } from "@/hooks/useGameContext"
+import { useConversationStore } from "@/stores/conversation"
 import useGameStore, { GameInitStateMessage } from "@/stores/game"
 import {
   applyCombatActionAcceptedState,
@@ -1455,13 +1456,6 @@ export function GameProvider({ children }: GameProviderProps) {
               break
             }
 
-            case "llm.function_call": {
-              console.debug("[GAME EVENT] LLM task message", e.payload)
-              const data = e.payload as Msg.LLMTaskMessage
-              useGameStore.getState().setLLMIsWorking(!!data.name)
-              break
-            }
-
             case "error": {
               console.debug("[GAME EVENT] Error", e.payload)
               const data = e.payload as Msg.ErrorMessage
@@ -1528,7 +1522,7 @@ export function GameProvider({ children }: GameProviderProps) {
             case "ui-agent-context-summary": {
               console.debug("[GAME EVENT] UI agent context summary", e.payload)
               const data = e.payload as Msg.UIAgentContextSummaryMessage
-              useGameStore.getState().injectMessage({
+              useConversationStore.getState().injectMessage({
                 role: "system",
                 parts: [
                   {

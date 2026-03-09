@@ -6,7 +6,6 @@ import type { DiamondFXController } from "@/fx/frame"
 import usePipecatClientStore from "@/stores/client"
 import { normalizePort, normalizeSector } from "@/utils/map"
 
-import { type ChatSlice, createChatSlice } from "./chatSlice"
 import { type CombatSlice, createCombatSlice } from "./combatSlice"
 import { createHistorySlice, type HistorySlice } from "./historySlice"
 import { createMapSlice, type MapSlice } from "./mapSlice"
@@ -272,9 +271,7 @@ const createGameSlice: StateCreator<GameStoreState, [], [], GameSlice> = (set, g
         const now = new Date().toISOString()
 
         // Detect ships that were alive and are now destroyed (for animation)
-        const aliveIds = new Set(
-          (state.ships.data ?? []).map((s: ShipSelf) => s.ship_id)
-        )
+        const aliveIds = new Set((state.ships.data ?? []).map((s: ShipSelf) => s.ship_id))
         for (const ship of ships) {
           if (ship.destroyed_at && aliveIds.has(ship.ship_id)) {
             if (!state.destroyingShipIds.includes(ship.ship_id)) {
@@ -489,7 +486,6 @@ export const selectIncomingMessageCount = (state: GameSlice) =>
   )?.length ?? 0
 
 export type GameStoreState = GameSlice &
-  ChatSlice &
   CombatSlice &
   HistorySlice &
   TaskSlice &
@@ -501,7 +497,6 @@ export type GameStoreState = GameSlice &
 const useGameStoreBase = create<GameStoreState>()(
   subscribeWithSelector((...a) => ({
     ...createGameSlice(...a),
-    ...createChatSlice(...a),
     ...createCombatSlice(...a),
     ...createHistorySlice(...a),
     ...createTaskSlice(...a),

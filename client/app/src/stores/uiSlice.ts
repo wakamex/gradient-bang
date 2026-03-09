@@ -250,13 +250,6 @@ export const createUISlice: StateCreator<UISlice> = (set, get) => ({
       })
     )
   },
-  setLLMIsWorking: (isWorking: boolean) => {
-    set(
-      produce((state) => {
-        state.llmIsWorking = isWorking
-      })
-    )
-  },
   setPlayerTargetId: (targetId: string | undefined) => {
     set(
       produce((state) => {
