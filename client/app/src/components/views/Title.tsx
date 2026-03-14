@@ -181,6 +181,15 @@ export const Title = ({ onViewNext }: { onViewNext: () => void }) => {
                         }}
                       />
                     </div>
+                    <a
+                      href="https://www.gradient-bang.com/forgot-password"
+                      target="_blank"
+                      rel="noopener noreferrer w-fit"
+                    >
+                      <p className="text-xs uppercase text-subtle-foreground hover:text-foreground w-fit">
+                        Forgot password?
+                      </p>
+                    </a>
                     <Button
                       type="submit"
                       onClick={handleSignIn}
