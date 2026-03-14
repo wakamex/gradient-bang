@@ -6,7 +6,7 @@
  * No EDGE_API_TOKEN required - this is a public endpoint.
  */
 
-import { createPublicClient } from "../_shared/auth.ts";
+import { getAuthenticatedUser } from "../_shared/auth.ts";
 import { createServiceRoleClient } from "../_shared/client.ts";
 import {
   enforcePublicRateLimit,
@@ -86,19 +86,7 @@ Deno.serve(traced("reset-password", async (req, trace) => {
   }
 
   try {
-    // Validate Authorization header
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return corsResponse(
-        { success: false, error: "Missing or invalid Authorization header" },
-        401,
-      );
-    }
-    const accessToken = authHeader.replace("Bearer ", "");
-
     const password = requireString(payload, "password");
-
-    trace.setInput({ hasAccessToken: Boolean(accessToken) });
 
     // Password validation
     if (password.length < 6) {
@@ -108,39 +96,30 @@ Deno.serve(traced("reset-password", async (req, trace) => {
       );
     }
 
-    // Create public Supabase client and set session from recovery token
-    const supabase = createPublicClient();
-
-    const sSetSession = trace.span("set_session");
-    const { data: sessionData, error: sessionError } =
-      await supabase.auth.setSession({
-        access_token: accessToken,
-        refresh_token: "",
-      });
-
-    if (sessionError) {
-      sSetSession.end({ error: sessionError.message });
-      console.error("reset-password.set_session", sessionError);
+    // Authenticate user from the recovery token passed via Authorization header
+    const sAuth = trace.span("authenticate_user");
+    let user;
+    try {
+      user = await getAuthenticatedUser(req);
+      sAuth.end({ user_id: user.id });
+    } catch (err) {
+      sAuth.end({ error: err instanceof Error ? err.message : String(err) });
       return corsResponse(
         { success: false, error: "Invalid or expired recovery token" },
         401,
       );
     }
 
-    if (!sessionData.user) {
-      sSetSession.end({ error: "No user in session" });
-      return corsResponse(
-        { success: false, error: "Failed to verify session" },
-        401,
-      );
-    }
-    sSetSession.end({ user_id: sessionData.user.id });
+    trace.setInput({ user_id: user.id });
 
-    // Update the password
+    // Update the password via service role admin API (the Authorization header
+    // is stripped by Supabase before reaching edge functions, so we can't use
+    // the user-scoped client — use admin.updateUserById instead)
     const sUpdatePassword = trace.span("update_password");
-    const { error: updateError } = await supabase.auth.updateUser({
-      password,
-    });
+    const { error: updateError } =
+      await serviceClient.auth.admin.updateUserById(user.id, {
+        password,
+      });
 
     if (updateError) {
       sUpdatePassword.end({ error: updateError.message });
@@ -152,7 +131,7 @@ Deno.serve(traced("reset-password", async (req, trace) => {
     }
     sUpdatePassword.end();
 
-    trace.setOutput({ user_id: sessionData.user.id });
+    trace.setOutput({ user_id: user.id });
 
     return corsResponse({
       success: true,
