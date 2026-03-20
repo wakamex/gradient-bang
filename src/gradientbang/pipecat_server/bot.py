@@ -415,7 +415,7 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
                 {
                     "frame_type": "event",
                     "event": "llm.context_summarized",
-                    "data": {
+                    "payload": {
                         "original_message_count": event.original_message_count,
                         "new_message_count": event.new_message_count,
                         "summarized_message_count": event.summarized_message_count,
