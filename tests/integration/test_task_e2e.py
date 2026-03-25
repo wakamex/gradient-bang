@@ -322,6 +322,102 @@ class TestAsyncCompletionE2E:
             await h.stop()
 
 
+# ── Client-initiated cancellation ────────────────────────────────────────
+
+
+@pytest.mark.integration
+class TestTaskCancellationE2E:
+    """Client-initiated task cancel should produce 'cancelled' status, not 'failed'."""
+
+    @pytest.fixture(autouse=True)
+    async def setup(self, reset_db_with_characters, edge_api, make_game_client):
+        await reset_db_with_characters(["test_task_cancel_p1"])
+        self.character_id = canonicalize_character_id("test_task_cancel_p1")
+        self.api = edge_api
+        self.make_game_client = make_game_client
+
+    async def test_client_cancel_produces_cancelled_status(self):
+        """Cancel via edge function (client path) → task.cancel event → bus cancel → cancelled status."""
+        h = E2EHarness(self.character_id, self.api, self.make_game_client)
+        await h.start()
+        try:
+            await h.join_game()
+
+            # Gate keeps the task alive by pausing the ScriptedLLM.
+            h._task_llm_gate = asyncio.Event()
+            h.set_task_script([("my_status", {})] * 10)
+            result = await h.start_player_task("Long running task for cancel test")
+            assert result["success"] is True, f"start_task failed: {result}"
+
+            # Wait for task group to appear (pipeline build is async)
+            for _ in range(40):
+                if h.voice_agent._task_groups:
+                    break
+                await asyncio.sleep(0.05)
+            assert len(h.voice_agent._task_groups) > 0, "Task should be active"
+
+            # Find the TaskAgent's game-level task_id
+            task_agent = next(
+                (c for c in h.voice_agent.children if isinstance(c, TaskAgent) and not c._is_corp_ship),
+                None,
+            )
+            assert task_agent is not None, "TaskAgent child should exist"
+
+            # Wait for the task to receive its game-level task_id from the task_start edge function
+            for _ in range(40):
+                if task_agent._active_task_id:
+                    break
+                await h.poll_and_feed_events()
+                await asyncio.sleep(0.1)
+            game_task_id = task_agent._active_task_id
+            assert game_task_id, "TaskAgent should have a game-level task_id"
+
+            # Cancel via edge function (simulates client cancel-task RTVI message)
+            cancel_result = await h.api.call_ok("task_cancel", {
+                "character_id": self.character_id,
+                "task_id": game_task_id,
+            })
+            assert cancel_result.get("task_id") == game_task_id
+
+            # Poll events: brings task.cancel through relay → VoiceAgent.broadcast_game_event
+            await h.poll_and_feed_events()
+
+            # Open the gate so cleanup can proceed
+            h._task_llm_gate.set()
+            await asyncio.sleep(1.0)
+
+            # Task group should be cleaned up
+            assert len(h.voice_agent._task_groups) == 0, (
+                f"Task should be cancelled. Active groups: {list(h.voice_agent._task_groups.keys())}"
+            )
+
+            # VoiceAgent LLM should have task.cancelled (not task.failed)
+            cancelled_msgs = [c for c, _ in h.llm_messages if "task.cancelled" in c]
+            failed_msgs = [c for c, _ in h.llm_messages if "task.failed" in c]
+            assert len(cancelled_msgs) >= 1, (
+                f"Expected task.cancelled in voice LLM. "
+                f"Got: {[c[:80] for c, _ in h.llm_messages]}"
+            )
+            assert len(failed_msgs) == 0, (
+                f"Should NOT have task.failed in voice LLM. "
+                f"Got: {[c[:80] for c in failed_msgs]}"
+            )
+
+            # RTVI should have cancellation output
+            cancelled_outputs = [
+                t for t in h.rtvi_events_of_type("task_output")
+                if t.get("payload", {}).get("task_message_type") == "cancelled"
+            ]
+            assert len(cancelled_outputs) >= 1, (
+                f"Expected RTVI task_output with cancelled type. "
+                f"Got: {h.rtvi_events_of_type('task_output')}"
+            )
+        finally:
+            if h._task_llm_gate:
+                h._task_llm_gate.set()
+            await h.stop()
+
+
 # ── Full voice loop ──────────────────────────────────────────────────────
 
 

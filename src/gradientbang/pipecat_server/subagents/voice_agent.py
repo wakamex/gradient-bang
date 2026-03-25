@@ -397,12 +397,22 @@ class VoiceAgent(LLMAgent):
         """Broadcast a game event to the bus for TaskAgent children."""
         await self.send_message(BusGameEventMessage(source=self.name, event=event))
 
+        event_name = event.get("event_name")
+
         # Cancel player ship tasks when the player enters combat.
         # Corp ship tasks continue running — they're independent.
-        if event.get("event_name") == "combat.round_waiting":
+        if event_name == "combat.round_waiting":
             payload = event.get("payload")
             if isinstance(payload, dict) and self._is_player_combat_participant(payload):
                 await self._cancel_player_tasks_for_combat()
+
+        # Client-initiated task cancel: convert game event into bus-level cancel.
+        elif event_name == "task.cancel":
+            payload = event.get("payload")
+            if isinstance(payload, dict):
+                game_task_id = payload.get("task_id")
+                if game_task_id:
+                    await self._cancel_task_by_game_id(game_task_id)
 
     def _is_player_combat_participant(self, payload: dict) -> bool:
         """Check if our character is listed in the combat participants."""
@@ -428,6 +438,24 @@ class VoiceAgent(LLMAgent):
                     logger.info(f"Cancelled player task group {tid} for combat")
                 except Exception as e:
                     logger.error(f"Failed to cancel task group {tid} for combat: {e}")
+
+    async def _cancel_task_by_game_id(self, game_task_id: str) -> None:
+        """Cancel a task identified by its game-level task_id."""
+        child = next(
+            (c for c in self.children
+             if isinstance(c, TaskAgent) and c._active_task_id == game_task_id),
+            None,
+        )
+        if not child:
+            return
+        for tid, group in list(self._task_groups.items()):
+            if child.name in group.agent_names:
+                try:
+                    await self.cancel_task(tid, reason="Cancelled by client")
+                    logger.info(f"Cancelled task {tid} (game_task_id={game_task_id[:8]}) via client cancel")
+                except Exception as e:
+                    logger.error(f"Failed to cancel task {tid} via client cancel: {e}")
+                return
 
     def is_our_task(self, task_id: str) -> bool:
         """Check if a task_id belongs to one of our active task groups."""

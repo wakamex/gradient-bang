@@ -291,6 +291,7 @@ class TaskAgent(LLMAgent):
 
     async def on_task_cancelled(self, task_id: str, reason: Optional[str]) -> None:
         self._cancelled = True
+        self._task_finished_status = "cancelled"
         logger.info(f"TaskAgent '{self.name}': task {task_id[:8]} cancelled: {reason}")
 
         self._quench_inference_state()
@@ -603,7 +604,7 @@ class TaskAgent(LLMAgent):
         self._task_finished = True
         self._task_finished_message = args.get("message", "Done")
         status = args.get("status", "completed")
-        if status not in ("completed", "failed"):
+        if status not in ("completed", "failed", "cancelled"):
             status = "completed"
         self._task_finished_status = status
         # Await the FINISHED update so it reaches the parent before send_task_response
@@ -638,7 +639,8 @@ class TaskAgent(LLMAgent):
     async def _complete_task(self):
         self._game_client.current_task_id = None
         self._active_task_id = None  # Stop processing events
-        status = TaskStatus.COMPLETED if self._task_finished_status == "completed" else TaskStatus.FAILED
+        _STATUS_MAP = {"completed": TaskStatus.COMPLETED, "cancelled": TaskStatus.CANCELLED}
+        status = _STATUS_MAP.get(self._task_finished_status, TaskStatus.FAILED)
         try:
             await self.send_task_response(
                 response={
