@@ -145,6 +145,11 @@ export function applySpokenBotOutputProgress(
 ): boolean {
   if (parts.length === 0) return false
 
+  // Pure-punctuation spoken text (e.g. "—", "...") normalizes to empty and
+  // can never match against unspoken content. Treat it as consumed so the
+  // cursor stays in place and subsequent words can still match.
+  if (normalizeForMatching(spokenText).trim().length === 0) return true
+
   // Find the next part that should be spoken (skip parts already marked final/skipped)
   let partToMatch = cursor.currentPartIndex
   while (partToMatch < parts.length && cursor.partFinalFlags[partToMatch]) {

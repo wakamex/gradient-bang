@@ -68,9 +68,9 @@ When an action fails:
 3. Either take a DIFFERENT action or skip and continue
 4. You have all the information needed - no extra tool calls required
 
-## Destructive Tools
+## High-Stakes Tools
 
-Tools marked ⚠️ DESTRUCTIVE are irreversible. Before calling one, verify the action and target match the task description. If the task is ambiguous about the target or amount, call `finished` and ask for clarification rather than guessing.
+Some tools (selling ships, leaving corporations, kicking members) have permanent effects. Verify the action and target match the task description. If the task is ambiguous about the target or amount, call `finished` and ask for clarification rather than guessing.
 
 ## Waiting for Events
 

@@ -50,7 +50,7 @@ purchase_ship(
 
 ## Selling Corporation Ships
 
-`sell_ship` is marked ⚠️ DESTRUCTIVE — the ship is permanently destroyed and cannot be recovered.
+`sell_ship` removes the ship and returns trade-in value as credits.
 
 ### Selling Rules
 - You can ONLY sell corporation ships that YOU purchased — not other members' ships

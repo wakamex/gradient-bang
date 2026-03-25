@@ -187,8 +187,8 @@ SALVAGE_COLLECT = FunctionSchema(
 DUMP_CARGO = FunctionSchema(
     name="dump_cargo",
     description=(
-        "⚠️ DESTRUCTIVE — Jettison cargo into space to create salvage in the current sector. "
-        "Dumped cargo is permanently lost from your hold. "
+        "Jettison cargo into space to create salvage in the current sector. "
+        "Dumped cargo is lost from your hold. "
         'Example: dump_cargo({"items": [{"commodity": "quantum_foam", "units": 1}]})'
     ),
     properties={
@@ -250,8 +250,7 @@ PURCHASE_FIGHTERS = FunctionSchema(
 TRANSFER_WARP_POWER = FunctionSchema(
     name="transfer_warp_power",
     description=(
-        "⚠️ DESTRUCTIVE — Transfer warp power to another ship in the same sector. "
-        "Warp power is permanently transferred and cannot be reclaimed. Provide one of "
+        "Transfer warp power to another ship in the same sector. Provide one of "
         "to_player_name, to_ship_id, or to_ship_name. For corporation ships, "
         "use corporation_info to find the ship_id. to_ship_id accepts a full UUID "
         "or a 6-8 hex prefix (unique in the current sector). If you see a name like "
@@ -284,8 +283,7 @@ TRANSFER_WARP_POWER = FunctionSchema(
 TRANSFER_CREDITS = FunctionSchema(
     name="transfer_credits",
     description=(
-        "⚠️ DESTRUCTIVE — Transfer on-hand credits to another ship in the same sector. "
-        "Credits are permanently transferred and cannot be reclaimed. Provide "
+        "Transfer on-hand credits to another ship in the same sector. Provide "
         "one of to_player_name, to_ship_id, or to_ship_name. For corporation ships, "
         "use corporation_info to find the ship_id. to_ship_id accepts a full UUID "
         "or a 6-8 hex prefix (unique in the current sector). If you see a name like "
@@ -465,8 +463,8 @@ JOIN_CORPORATION = FunctionSchema(
 LEAVE_CORPORATION = FunctionSchema(
     name="leave_corporation",
     description=(
-        "⚠️ DESTRUCTIVE — Leave your current corporation. "
-        "You immediately lose corporation access. Requires a new invite to rejoin."
+        "Leave your current corporation. "
+        "You lose corporation access and would need a new invite to rejoin."
     ),
     properties={
         "character_id": {
@@ -480,8 +478,8 @@ LEAVE_CORPORATION = FunctionSchema(
 KICK_CORPORATION_MEMBER = FunctionSchema(
     name="kick_corporation_member",
     description=(
-        "⚠️ DESTRUCTIVE — Remove another member from your corporation. "
-        "The member immediately loses corporation access. Requires a new invite to rejoin."
+        "Remove another member from your corporation. "
+        "They lose corporation access and need a new invite to rejoin."
     ),
     properties={
         "target_id": {
@@ -537,8 +535,7 @@ SHIP_DEFINITIONS = FunctionSchema(
 PURCHASE_SHIP = FunctionSchema(
     name="purchase_ship",
     description=(
-        "⚠️ HIGH-VALUE — Purchase a ship for personal use or on behalf of your corporation. "
-        "This is a significant credit commitment. "
+        "Purchase a ship for personal use or on behalf of your corporation. "
         "Personal purchases use ship credits (with trade-in value from current ship). "
         "Corporation purchases draw from bank credits and may seed initial ship credits. "
         "If ship_name is omitted, the default display name is used and auto-suffixed "
@@ -613,8 +610,7 @@ PURCHASE_SHIP = FunctionSchema(
 SELL_SHIP = FunctionSchema(
     name="sell_ship",
     description=(
-        "⚠️ DESTRUCTIVE — Sell a corporation ship. The ship is permanently destroyed "
-        "and trade-in value is returned as credits. This cannot be undone. "
+        "Sell a corporation ship. The ship is removed and trade-in value is returned as credits. "
         "Only works at a mega-port. You cannot sell your personal ship. "
         "Call corporation_info() first to find the ship and its short ID shown in brackets "
         "(e.g. [5606a3]), and ship_definitions() for pricing."
