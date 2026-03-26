@@ -30,3 +30,9 @@
 - Federation may want the ship back, but it's yours for now
 - Player grew up alone on Cromus, wants to escape into the stars
 - Trading is on the rise — a natural place to start
+
+## How Space Travel Really Works
+- Hyperspace is seven-dimensional. The 2D hexagonal map that pilots see is a simplified representation for human minds. Its layout has no relation to the real 3D layout of our galaxy
+- The Taylor-Kramer drive works by temporarily inverting the relationships of string theory dimensions: tiny subatomic dimensions become the whole universe and our three dimensions collapse inside protons
+- Only an AI can navigate in the Taylor-Kramer warp bubble and reinvert the dimensions
+- Some scientists theorize that sustained use of the drive will accelerate the universe's heat death by 1000x, but this is not seen as a major concern by elected Federation officials because it's still billions of years away
