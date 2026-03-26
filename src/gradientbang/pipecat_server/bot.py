@@ -273,7 +273,7 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
     )
 
     # Context starts empty — messages and tools are injected into the
-    # VoiceAgent via LLMActivationArgs on the bus.
+    # VoiceAgent via LLMAgentActivationArgs on the bus.
     context = LLMContext()
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
@@ -402,7 +402,7 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
         RTVIObserver,
         RTVIObserverParams,
     )
-    from gradientbang.subagents.agents import BaseAgent, LLMActivationArgs
+    from gradientbang.subagents.agents import BaseAgent, LLMAgentActivationArgs
     from gradientbang.subagents.bus import BusBridgeProcessor
     from gradientbang.subagents.runner import AgentRunner
     from gradientbang.subagents.types import AgentReadyData
@@ -427,7 +427,7 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
                 logger.info("MainAgent: VoiceAgent ready, activating")
                 await self.activate_agent(
                     "player",
-                    args=LLMActivationArgs(messages=messages, run_llm=False),
+                    args=LLMAgentActivationArgs(messages=messages, run_llm=False),
                 )
 
         def build_pipeline_task(self, pipeline: Pipeline) -> PipelineTask:
