@@ -11,7 +11,6 @@ so EventRelay can query task state during event routing.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 import time
@@ -20,15 +19,23 @@ from collections import deque
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from loguru import logger
-
 from pipecat.frames.frames import (
     FunctionCallResultProperties,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
     LLMMessagesAppendFrame,
     LLMRunFrame,
 )
 from pipecat.processors.frameworks.rtvi import RTVIProcessor, RTVIServerMessageFrame
 from pipecat.services.llm_service import FunctionCallParams
 
+from gradientbang.pipecat_server.frames import TaskActivityFrame
+from gradientbang.pipecat_server.subagents.bus_messages import (
+    BusGameEventMessage,
+    BusSteerTaskMessage,
+)
+from gradientbang.pipecat_server.subagents.event_relay import EventRelay
+from gradientbang.pipecat_server.subagents.task_agent import TaskAgent
 from gradientbang.subagents.agents import LLMAgent
 from gradientbang.subagents.bus import (
     AgentBus,
@@ -37,11 +44,6 @@ from gradientbang.subagents.bus import (
     BusTaskUpdateMessage,
     TaskStatus,
 )
-
-from gradientbang.pipecat_server.frames import TaskActivityFrame
-from gradientbang.pipecat_server.subagents.bus_messages import BusGameEventMessage, BusSteerTaskMessage
-from gradientbang.pipecat_server.subagents.event_relay import EventRelay
-from gradientbang.pipecat_server.subagents.task_agent import TaskAgent
 from gradientbang.tools import VOICE_TOOLS
 from gradientbang.utils.llm_factory import create_llm_service, get_voice_llm_config
 from gradientbang.utils.supabase_client import AsyncGameClient
@@ -103,7 +105,28 @@ class VoiceAgent(LLMAgent):
         # ── Inject coalescing ──
         self._inject_run_pending: bool = False
 
+        # ── LLM response lifecycle ──
+        self._llm_response_inflight: bool = False
+        self._deferred_after_response: bool = False
 
+    # ── Lifecycle ───────────────────────────────────────────────────────
+
+    async def on_ready(self) -> None:
+        """Register downstream frame watchers for LLM response lifecycle tracking."""
+        await super().on_ready()
+        self.pipeline_task.add_reached_downstream_filter(
+            (LLMFullResponseStartFrame, LLMFullResponseEndFrame)
+        )
+
+        @self.pipeline_task.event_handler("on_frame_reached_downstream")
+        async def _on_llm_response_lifecycle(task, frame):
+            if isinstance(frame, LLMFullResponseStartFrame):
+                self._llm_response_inflight = True
+            elif isinstance(frame, LLMFullResponseEndFrame):
+                self._llm_response_inflight = False
+                if self._deferred_after_response:
+                    self._deferred_after_response = False
+                    await self.queue_frame(LLMRunFrame())
 
     # ── Properties ─────────────────────────────────────────────────────
 
@@ -170,29 +193,9 @@ class VoiceAgent(LLMAgent):
         self._prune_request_ids()
         return request_id in self._voice_agent_request_ids
 
-    async def inject_context(self, messages: list, *, run_llm: bool = True) -> None:
-        """Inject messages into LLM context, deferring if tool calls are active."""
-        await self.queue_frame_after_tools(
-            LLMMessagesAppendFrame(messages=messages, run_llm=run_llm)
-        )
-
+    """
     async def queue_frame_after_tools(self, frame) -> None:
-        """Queue a frame, coalescing inference triggers when no tool is active.
-
-        Extends the base implementation with rapid-fire coalescing for the
-        no-tool-inflight case.  When multiple ``LLMMessagesAppendFrame`` frames
-        with ``run_llm=True`` arrive in the same asyncio iteration (e.g. a
-        task.completed bus message and a status.snapshot game event both landing
-        simultaneously), the base class would queue each immediately and Pipecat
-        would fire a separate LLM inference for every one.
-
-        This override suppresses ``run_llm`` on each append and schedules a
-        single deferred ``LLMRunFrame`` via ``asyncio.ensure_future``.  All
-        callers within the same asyncio tick share the one pending task, so
-        exactly one ``LLMRunFrame`` is queued regardless of how many frames
-        arrive at once.  The tool-inflight path is unchanged — deferred frames
-        are coalesced as before by ``process_deferred_tool_frames``.
-        """
+       
         if self._tool_call_inflight > 0:
             self._deferred_frames.append(frame)
         elif isinstance(frame, LLMMessagesAppendFrame) and frame.run_llm:
@@ -203,12 +206,7 @@ class VoiceAgent(LLMAgent):
                 asyncio.ensure_future(self._emit_coalesced_run())
         else:
             await self.queue_frame(frame)
-
-    async def _emit_coalesced_run(self) -> None:
-        """Send a single LLMRunFrame after yielding to accumulate same-tick injections."""
-        await asyncio.sleep(0)
-        self._inject_run_pending = False
-        await self.queue_frame(LLMRunFrame())
+    """
 
     # ── Deferred frame processing ────────────────────────────────────
 
@@ -225,8 +223,12 @@ class VoiceAgent(LLMAgent):
             if isinstance(f, LLMMessagesAppendFrame) and f.run_llm:
                 f.run_llm = False
                 needs_inference = True
-        if needs_inference:
-            frames.append(LLMRunFrame())
+        if needs_inference or self._deferred_after_response:
+            self._deferred_after_response = False
+            if self._llm_response_inflight:
+                self._deferred_after_response = True  # re-defer until speech ends
+            else:
+                frames.append(LLMRunFrame())
         return frames
 
     # ── Request ID tracking ────────────────────────────────────────────
@@ -266,27 +268,40 @@ class VoiceAgent(LLMAgent):
 
     # ── Event-generating tools ─────────────────────────────────────────
     # Return ack with run_llm=False. Real data arrives via game event.
+    # On error, call result_callback with the error so the spinner clears.
 
     async def _handle_my_status(self, params: FunctionCallParams):
-        result = await self._game_client.my_status(character_id=self._character_id)
-        self._track_request_id_from_result(result)
-        await params.result_callback(
-            {"status": "Executed."},
-            properties=FunctionCallResultProperties(run_llm=False),
-        )
+        try:
+            result = await self._game_client.my_status(character_id=self._character_id)
+            self._track_request_id_from_result(result)
+            await params.result_callback(
+                {"status": "Executed."},
+                properties=FunctionCallResultProperties(run_llm=False),
+            )
+        except Exception as exc:
+            await params.result_callback(
+                {"error": str(exc)},
+                properties=FunctionCallResultProperties(run_llm=True),
+            )
 
     async def _handle_plot_course(self, params: FunctionCallParams):
         args = params.arguments
-        result = await self._game_client.plot_course(
-            to_sector=args["to_sector"],
-            character_id=self._character_id,
-            from_sector=args.get("from_sector"),
-        )
-        self._track_request_id_from_result(result)
-        await params.result_callback(
-            {"status": "Executed."},
-            properties=FunctionCallResultProperties(run_llm=False),
-        )
+        try:
+            result = await self._game_client.plot_course(
+                to_sector=args["to_sector"],
+                character_id=self._character_id,
+                from_sector=args.get("from_sector"),
+            )
+            self._track_request_id_from_result(result)
+            await params.result_callback(
+                {"status": "Executed."},
+                properties=FunctionCallResultProperties(run_llm=False),
+            )
+        except Exception as exc:
+            await params.result_callback(
+                {"error": str(exc)},
+                properties=FunctionCallResultProperties(run_llm=True),
+            )
 
     async def _handle_list_known_ports(self, params: FunctionCallParams):
         args = params.arguments
@@ -294,97 +309,141 @@ class VoiceAgent(LLMAgent):
         for key in ("from_sector", "max_hops", "port_type", "commodity", "trade_type", "mega"):
             if args.get(key) is not None:
                 kwargs[key] = args[key]
-        result = await self._game_client.list_known_ports(character_id=self._character_id, **kwargs)
-        self._track_request_id_from_result(result)
-        await params.result_callback(
-            {"status": "Executed."},
-            properties=FunctionCallResultProperties(run_llm=False),
-        )
+        try:
+            result = await self._game_client.list_known_ports(
+                character_id=self._character_id, **kwargs
+            )
+            self._track_request_id_from_result(result)
+            await params.result_callback(
+                {"status": "Executed."},
+                properties=FunctionCallResultProperties(run_llm=False),
+            )
+        except Exception as exc:
+            await params.result_callback(
+                {"error": str(exc)},
+                properties=FunctionCallResultProperties(run_llm=True),
+            )
 
     async def _handle_rename_ship(self, params: FunctionCallParams):
         args = params.arguments
-        result = await self._game_client.rename_ship(
-            ship_name=args["ship_name"],
-            ship_id=args.get("ship_id"),
-            character_id=self._character_id,
-        )
-        self._track_request_id_from_result(result)
-        await params.result_callback(
-            {"status": "Executed."},
-            properties=FunctionCallResultProperties(run_llm=False),
-        )
+        try:
+            result = await self._game_client.rename_ship(
+                ship_name=args["ship_name"],
+                ship_id=args.get("ship_id"),
+                character_id=self._character_id,
+            )
+            self._track_request_id_from_result(result)
+            await params.result_callback(
+                {"status": "Executed."},
+                properties=FunctionCallResultProperties(run_llm=False),
+            )
+        except Exception as exc:
+            await params.result_callback(
+                {"error": str(exc)},
+                properties=FunctionCallResultProperties(run_llm=True),
+            )
 
     async def _handle_rename_corporation(self, params: FunctionCallParams):
         args = params.arguments
-        result = await self._game_client.rename_corporation(
-            name=args["name"],
-            character_id=self._character_id,
-        )
-        self._track_request_id_from_result(result)
-        await params.result_callback(
-            {"status": "Executed."},
-            properties=FunctionCallResultProperties(run_llm=False),
-        )
+        try:
+            result = await self._game_client.rename_corporation(
+                name=args["name"],
+                character_id=self._character_id,
+            )
+            self._track_request_id_from_result(result)
+            await params.result_callback(
+                {"status": "Executed."},
+                properties=FunctionCallResultProperties(run_llm=False),
+            )
+        except Exception as exc:
+            await params.result_callback(
+                {"error": str(exc)},
+                properties=FunctionCallResultProperties(run_llm=True),
+            )
 
     async def _handle_create_corporation(self, params: FunctionCallParams):
         args = params.arguments
-        result = await self._game_client.create_corporation(
-            name=args["name"],
-            character_id=self._character_id,
-        )
-        self._track_request_id_from_result(result)
-        await params.result_callback(
-            {"status": "Executed."},
-            properties=FunctionCallResultProperties(run_llm=False),
-        )
+        try:
+            result = await self._game_client.create_corporation(
+                name=args["name"],
+                character_id=self._character_id,
+            )
+            self._track_request_id_from_result(result)
+            await params.result_callback(
+                {"status": "Executed."},
+                properties=FunctionCallResultProperties(run_llm=False),
+            )
+        except Exception as exc:
+            await params.result_callback(
+                {"error": str(exc)},
+                properties=FunctionCallResultProperties(run_llm=True),
+            )
 
     # ── Fire-and-forget tools ──────────────────────────────────────────
 
     async def _handle_send_message(self, params: FunctionCallParams):
         args = params.arguments
-        result = await self._game_client.send_message(
-            content=args["content"],
-            msg_type=args.get("msg_type", "broadcast"),
-            to_name=args.get("to_player"),
-            to_ship_id=args.get("to_ship_id"),
-            to_ship_name=args.get("to_ship_name"),
-            character_id=self._character_id,
-        )
-        self._track_request_id_from_result(result)
-        await params.result_callback(
-            {"status": "Executed."},
-            properties=FunctionCallResultProperties(run_llm=False),
-        )
+        try:
+            result = await self._game_client.send_message(
+                content=args["content"],
+                msg_type=args.get("msg_type", "broadcast"),
+                to_name=args.get("to_player"),
+                to_ship_id=args.get("to_ship_id"),
+                to_ship_name=args.get("to_ship_name"),
+                character_id=self._character_id,
+            )
+            self._track_request_id_from_result(result)
+            await params.result_callback(
+                {"status": "Executed."},
+                properties=FunctionCallResultProperties(run_llm=False),
+            )
+        except Exception as exc:
+            await params.result_callback(
+                {"error": str(exc)},
+                properties=FunctionCallResultProperties(run_llm=True),
+            )
 
     async def _handle_combat_initiate(self, params: FunctionCallParams):
         args = params.arguments
-        result = await self._game_client.combat_initiate(
-            character_id=self._character_id,
-            target_id=args.get("target_id"),
-            target_type=args.get("target_type", "character"),
-        )
-        self._track_request_id_from_result(result)
-        await params.result_callback(
-            {"status": "Executed."},
-            properties=FunctionCallResultProperties(run_llm=False),
-        )
+        try:
+            result = await self._game_client.combat_initiate(
+                character_id=self._character_id,
+                target_id=args.get("target_id"),
+                target_type=args.get("target_type", "character"),
+            )
+            self._track_request_id_from_result(result)
+            await params.result_callback(
+                {"status": "Executed."},
+                properties=FunctionCallResultProperties(run_llm=False),
+            )
+        except Exception as exc:
+            await params.result_callback(
+                {"error": str(exc)},
+                properties=FunctionCallResultProperties(run_llm=True),
+            )
 
     async def _handle_combat_action(self, params: FunctionCallParams):
         args = params.arguments
-        result = await self._game_client.combat_action(
-            combat_id=args["combat_id"],
-            action=str(args["action"]).lower(),
-            commit=args.get("commit", 0),
-            target_id=args.get("target_id"),
-            to_sector=args.get("to_sector"),
-            round_number=args.get("round_number"),
-            character_id=self._character_id,
-        )
-        self._track_request_id_from_result(result)
-        await params.result_callback(
-            {"status": "Executed."},
-            properties=FunctionCallResultProperties(run_llm=False),
-        )
+        try:
+            result = await self._game_client.combat_action(
+                combat_id=args["combat_id"],
+                action=str(args["action"]).lower(),
+                commit=args.get("commit", 0),
+                target_id=args.get("target_id"),
+                to_sector=args.get("to_sector"),
+                round_number=args.get("round_number"),
+                character_id=self._character_id,
+            )
+            self._track_request_id_from_result(result)
+            await params.result_callback(
+                {"status": "Executed."},
+                properties=FunctionCallResultProperties(run_llm=False),
+            )
+        except Exception as exc:
+            await params.result_callback(
+                {"error": str(exc)},
+                properties=FunctionCallResultProperties(run_llm=True),
+            )
 
     # ── Direct-response tools ──────────────────────────────────────────
 
@@ -449,9 +508,15 @@ class VoiceAgent(LLMAgent):
 
     # ── Game event distribution ─────────────────────────────────────────
 
-    async def broadcast_game_event(self, event: Dict[str, Any]) -> None:
+    async def broadcast_game_event(
+        self, event: Dict[str, Any], *, voice_agent_originated: bool = False
+    ) -> None:
         """Broadcast a game event to the bus for TaskAgent children."""
-        await self.send_message(BusGameEventMessage(source=self.name, event=event))
+        await self.send_message(
+            BusGameEventMessage(
+                source=self.name, event=event, voice_agent_originated=voice_agent_originated
+            )
+        )
 
         event_name = event.get("event_name")
 
@@ -482,8 +547,7 @@ class VoiceAgent(LLMAgent):
     async def _cancel_player_tasks_for_combat(self) -> None:
         """Cancel all active player ship tasks (not corp ship tasks)."""
         player_task_agents = {
-            c.name for c in self.children
-            if isinstance(c, TaskAgent) and not c._is_corp_ship
+            c.name for c in self.children if isinstance(c, TaskAgent) and not c._is_corp_ship
         }
         if not player_task_agents:
             return
@@ -498,8 +562,11 @@ class VoiceAgent(LLMAgent):
     async def _cancel_task_by_game_id(self, game_task_id: str) -> None:
         """Cancel a task identified by its game-level task_id."""
         child = next(
-            (c for c in self.children
-             if isinstance(c, TaskAgent) and c._active_task_id == game_task_id),
+            (
+                c
+                for c in self.children
+                if isinstance(c, TaskAgent) and c._active_task_id == game_task_id
+            ),
             None,
         )
         if not child:
@@ -508,7 +575,9 @@ class VoiceAgent(LLMAgent):
             if child.name in group.agent_names:
                 try:
                     await self.cancel_task(tid, reason="Cancelled by client")
-                    logger.info(f"Cancelled task {tid} (game_task_id={game_task_id[:8]}) via client cancel")
+                    logger.info(
+                        f"Cancelled task {tid} (game_task_id={game_task_id[:8]}) via client cancel"
+                    )
                 except Exception as e:
                     logger.error(f"Failed to cancel task {tid} via client cancel: {e}")
                 return
@@ -536,10 +605,9 @@ class VoiceAgent(LLMAgent):
 
     def _update_polling_scope(self) -> None:
         """Derive corp ship IDs from children and update game_client polling."""
-        ship_ids = sorted({
-            c._character_id for c in self.children
-            if isinstance(c, TaskAgent) and c._is_corp_ship
-        })
+        ship_ids = sorted(
+            {c._character_id for c in self.children if isinstance(c, TaskAgent) and c._is_corp_ship}
+        )
         self._game_client.set_event_polling_scope(
             character_ids=[self._character_id],
             corp_id=self._game_client.corporation_id,
@@ -610,10 +678,7 @@ class VoiceAgent(LLMAgent):
         ships = corp.get("ships")
         if not isinstance(ships, list):
             return False
-        return any(
-            isinstance(s, dict) and s.get("ship_id") == ship_id
-            for s in ships
-        )
+        return any(isinstance(s, dict) and s.get("ship_id") == ship_id for s in ships)
 
     # ── Agent lifecycle ────────────────────────────────────────────────
 
@@ -621,7 +686,9 @@ class VoiceAgent(LLMAgent):
         await super().on_agent_ready(data)
         pending = self._pending_tasks.pop(data.agent_name, None)
         if pending:
-            await self.request_task(data.agent_name, payload=pending, timeout=self._task_agent_timeout)
+            await self.request_task(
+                data.agent_name, payload=pending, timeout=self._task_agent_timeout
+            )
             self._update_polling_scope()
             logger.info("VoiceAgent: task agent '{}' ready, dispatched task", data.agent_name)
 
@@ -636,7 +703,9 @@ class VoiceAgent(LLMAgent):
 
         if update_type == "progress_report":
             summary = update.get("summary", "No update available.")
-            event_xml = f'<event name="task.progress" task_id="{message.task_id[:8]}">\n{summary}\n</event>'
+            event_xml = (
+                f'<event name="task.progress" task_id="{message.task_id[:8]}">\n{summary}\n</event>'
+            )
             await self.queue_frame_after_tools(
                 LLMMessagesAppendFrame(
                     messages=[{"role": "user", "content": event_xml}], run_llm=True
@@ -646,7 +715,10 @@ class VoiceAgent(LLMAgent):
             text = update.get("text", "")
             message_type = update.get("message_type")
             # Get task_type from the child agent
-            child = next((c for c in self.children if isinstance(c, TaskAgent) and c.name == message.source), None)
+            child = next(
+                (c for c in self.children if isinstance(c, TaskAgent) and c.name == message.source),
+                None,
+            )
             task_type = "corp_ship" if child and child._is_corp_ship else "player_ship"
             await self._task_output_handler(text, message_type, message.task_id, task_type)
 
@@ -654,15 +726,21 @@ class VoiceAgent(LLMAgent):
         await super().on_task_response(message)
 
         agent_name = message.source
-        child = next((c for c in self.children if isinstance(c, TaskAgent) and c.name == agent_name), None)
+        child = next(
+            (c for c in self.children if isinstance(c, TaskAgent) and c.name == agent_name), None
+        )
         task_type = "corp_ship" if child and child._is_corp_ship else "player_ship"
         is_corp = child._is_corp_ship if child else False
 
         if message.status == TaskStatus.COMPLETED:
-            await self._task_output_handler("Task completed successfully", "complete", message.task_id, task_type)
+            await self._task_output_handler(
+                "Task completed successfully", "complete", message.task_id, task_type
+            )
             status_label = "completed"
         elif message.status == TaskStatus.CANCELLED:
-            await self._task_output_handler("Task was cancelled", "cancelled", message.task_id, task_type)
+            await self._task_output_handler(
+                "Task was cancelled", "cancelled", message.task_id, task_type
+            )
             status_label = "cancelled"
         else:
             fail_msg = (message.response or {}).get("message", "Task failed")
@@ -675,8 +753,9 @@ class VoiceAgent(LLMAgent):
             f'<event name="task.{status_label}" task_id="{message.task_id[:8]}" '
             f'task_type="{task_type}">\n{llm_msg}\n</event>'
         )
-        await self.inject_context(
-            [{"role": "user", "content": event_xml}], run_llm=True
+
+        await self.queue_frame_after_tools(
+            LLMMessagesAppendFrame(messages=[{"role": "user", "content": event_xml}], run_llm=True)
         )
 
         # End the task agent
@@ -751,7 +830,9 @@ class VoiceAgent(LLMAgent):
                 if ship_id == self._character_id:
                     ship_id = None
                 elif not await self._is_corp_ship_id(ship_id):
-                    logger.info(f"ship_id {ship_id[:8]} is not a corp ship, treating as player task")
+                    logger.info(
+                        f"ship_id {ship_id[:8]} is not a corp ship, treating as player task"
+                    )
                     ship_id = None
 
             target_character_id = ship_id if ship_id else self._character_id
@@ -759,13 +840,19 @@ class VoiceAgent(LLMAgent):
             # Check duplicate: any child TaskAgent with same character_id
             for child in self.children:
                 if isinstance(child, TaskAgent) and child._character_id == target_character_id:
-                    return {"success": False, "error": f"Ship {target_character_id[:8]}... already has a task running. Stop it first."}
+                    return {
+                        "success": False,
+                        "error": f"Ship {target_character_id[:8]}... already has a task running. Stop it first.",
+                    }
 
             # Corp ship limit
             if ship_id:
                 corp_count = self._count_active_corp_tasks()
                 if corp_count >= MAX_CORP_SHIP_TASKS:
-                    return {"success": False, "error": f"Cannot start more than {MAX_CORP_SHIP_TASKS} corp ship tasks."}
+                    return {
+                        "success": False,
+                        "error": f"Cannot start more than {MAX_CORP_SHIP_TASKS} corp ship tasks.",
+                    }
 
             task_type = self._get_task_type(ship_id)
             task_metadata = {
@@ -801,7 +888,12 @@ class VoiceAgent(LLMAgent):
             self._pending_tasks[agent_name] = payload
             await self.add_agent(task_agent)
 
-            return {"success": True, "message": "Task started", "task_id": agent_name, "task_type": task_type}
+            return {
+                "success": True,
+                "message": "Task started",
+                "task_id": agent_name,
+                "task_type": task_type,
+            }
         except Exception as e:
             logger.error(f"start_task failed: {e}")
             if task_game_client and task_game_client != self._game_client:
@@ -863,7 +955,9 @@ class VoiceAgent(LLMAgent):
                 break
 
         await self.send_message(
-            BusSteerTaskMessage(source=self.name, target=child.name, task_id=framework_tid or "", text=steering_text)
+            BusSteerTaskMessage(
+                source=self.name, target=child.name, task_id=framework_tid or "", text=steering_text
+            )
         )
         return {"success": True, "summary": "Steering instruction sent.", "task_id": child.name}
 
@@ -887,7 +981,12 @@ class VoiceAgent(LLMAgent):
         for tid, group in self._task_groups.items():
             if child.name in group.agent_names:
                 await self.request_task_update(tid, child.name)
-                return {"success": True, "summary": "Checking task progress now.", "task_id": child.name, "async": True}
+                return {
+                    "success": True,
+                    "summary": "Checking task progress now.",
+                    "task_id": child.name,
+                    "async": True,
+                }
 
         return {"success": False, "error": f"Task {child.name} not found in active groups"}
 
@@ -909,7 +1008,13 @@ class VoiceAgent(LLMAgent):
 
     async def _handle_stop_task_tool(self, params: FunctionCallParams):
         result = await self._handle_stop_task(params)
-        await params.result_callback({"result": result})
+        if result.get("success"):
+            await params.result_callback(
+                {"result": result},
+                properties=FunctionCallResultProperties(run_llm=False),
+            )
+        else:
+            await params.result_callback({"result": result})
 
     async def _handle_steer_task_tool(self, params: FunctionCallParams):
         result = await self._handle_steer_task(params)

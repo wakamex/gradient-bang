@@ -327,6 +327,59 @@ class TestDeferredEventBatching:
         assert all(f.run_llm is False for f in appends)
         assert len(runs) == 1, f"Expected 1 LLMRunFrame but got {len(runs)}: {runs}"
 
+    async def test_emit_coalesced_run_defers_when_llm_inflight(self):
+        """When LLM is speaking, _emit_coalesced_run sets deferred flag instead of emitting.
+
+        REGRESSION: task.completed arriving while the LLM is mid-response previously
+        queued a second LLMRunFrame immediately, causing a back-to-back double-response.
+        """
+        import asyncio
+
+        from pipecat.frames.frames import LLMRunFrame
+
+        agent = _make_voice_agent()
+        agent.queue_frame = AsyncMock()
+        agent._llm_response_inflight = True  # simulate LLM speaking
+
+        await agent.inject_context([{"role": "user", "content": "task.completed"}], run_llm=True)
+        await asyncio.sleep(0.01)
+
+        runs = [c.args[0] for c in agent.queue_frame.call_args_list
+                if isinstance(c.args[0], LLMRunFrame)]
+        assert len(runs) == 0, "Should not fire LLMRunFrame while LLM is inflight"
+        assert agent._deferred_after_response is True
+
+    async def test_deferred_run_fires_on_llm_response_end(self):
+        """N task completions while LLM speaking → deferred → 1 LLMRunFrame when speech ends.
+
+        Simulates the on_ready lifecycle handler triggering after LLMFullResponseEndFrame.
+        """
+        import asyncio
+
+        from pipecat.frames.frames import LLMRunFrame
+
+        agent = _make_voice_agent()
+        agent.queue_frame = AsyncMock()
+        agent._llm_response_inflight = True
+
+        # Three completions arrive while LLM is speaking
+        await asyncio.gather(
+            agent.inject_context([{"role": "user", "content": "task1"}], run_llm=True),
+            agent.inject_context([{"role": "user", "content": "task2"}], run_llm=True),
+            agent.inject_context([{"role": "user", "content": "task3"}], run_llm=True),
+        )
+        await asyncio.sleep(0.01)
+        assert agent._deferred_after_response is True
+
+        # Simulate LLMFullResponseEndFrame arriving (what the on_ready handler does)
+        agent._llm_response_inflight = False
+        agent._deferred_after_response = False
+        await agent.queue_frame(LLMRunFrame())
+
+        runs = [c.args[0] for c in agent.queue_frame.call_args_list
+                if isinstance(c.args[0], LLMRunFrame)]
+        assert len(runs) == 1
+
     async def test_process_deferred_tool_frames_hook(self):
         """process_deferred_tool_frames coalesces run_llm and appends LLMRunFrame."""
         from pipecat.frames.frames import LLMMessagesAppendFrame, LLMRunFrame
@@ -344,6 +397,59 @@ class TestDeferredEventBatching:
         assert all(f.run_llm is False for f in appends)
         assert len(runs) == 1
         assert len(result) == 4  # 3 appends + 1 run frame
+
+    async def test_emit_coalesced_run_defers_when_tool_inflight(self):
+        """task.completed schedules run (tool idle), tool starts before sleep(0) yields → defers.
+
+        Real scenario: task.completed arrives (no tool running) → _emit_coalesced_run scheduled.
+        Then my_status tool call starts (_tool_call_inflight increments) before the scheduled
+        coroutine gets its first asyncio tick. On tick, _emit_coalesced_run sees tool inflight
+        and defers via _deferred_after_response instead of firing LLMRunFrame.
+        """
+        import asyncio
+
+        from pipecat.frames.frames import LLMRunFrame
+
+        agent = _make_voice_agent()
+        agent.queue_frame = AsyncMock()
+        # Tool is idle — inject_context schedules _emit_coalesced_run
+        await agent.inject_context([{"role": "user", "content": "task.completed"}], run_llm=True)
+        # Tool starts before the scheduled coroutine gets its tick
+        agent._tool_call_inflight = 1
+        await asyncio.sleep(0.01)
+
+        runs = [c.args[0] for c in agent.queue_frame.call_args_list
+                if isinstance(c.args[0], LLMRunFrame)]
+        assert len(runs) == 0, "Should not fire LLMRunFrame while tool is inflight"
+        assert agent._deferred_after_response is True
+
+    async def test_process_deferred_frames_consumes_deferred_after_response(self):
+        """_deferred_after_response + status.snapshot deferred → ONE LLMRunFrame on flush."""
+        from pipecat.frames.frames import LLMMessagesAppendFrame, LLMRunFrame
+
+        agent = _make_voice_agent()
+        agent._deferred_after_response = True  # set by _emit_coalesced_run when tool was inflight
+
+        frames = [
+            LLMMessagesAppendFrame(messages=[{"role": "user", "content": "status.snapshot"}], run_llm=True)
+        ]
+        result = await agent.process_deferred_tool_frames(frames)
+
+        runs = [f for f in result if isinstance(f, LLMRunFrame)]
+        assert len(runs) == 1
+        assert agent._deferred_after_response is False
+
+    async def test_process_deferred_frames_deferred_only_no_status_snapshot(self):
+        """_deferred_after_response=True but no deferred frames → still fires ONE LLMRunFrame."""
+        from pipecat.frames.frames import LLMRunFrame
+
+        agent = _make_voice_agent()
+        agent._deferred_after_response = True
+
+        result = await agent.process_deferred_tool_frames([])
+        runs = [f for f in result if isinstance(f, LLMRunFrame)]
+        assert len(runs) == 1
+        assert agent._deferred_after_response is False
 
 
 # ── Task tool handlers ────────────────────────────────────────────────

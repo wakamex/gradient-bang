@@ -16,9 +16,14 @@ class BusGameEventMessage(BusMessage):
 
     Parameters:
         event: The game event dict (has event_name, payload, etc.).
+        voice_agent_originated: True if the event was triggered by a VoiceAgent
+            tool call (request_id is in VoiceAgent's recent request_id cache).
+            TaskAgents use this to ignore errors from the VoiceAgent's own calls
+            so they don't affect TaskAgent completion tracking or error counts.
     """
 
     event: Dict[str, Any] = field(default_factory=dict)
+    voice_agent_originated: bool = False
 
 
 @dataclass

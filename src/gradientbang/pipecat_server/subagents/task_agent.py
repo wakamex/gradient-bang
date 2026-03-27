@@ -355,13 +355,21 @@ class TaskAgent(LLMAgent):
         await super().on_bus_message(message)
         if isinstance(message, BusGameEventMessage):
             if self._active_task_id:
-                await self._handle_bus_game_event(message.event)
+                await self._handle_bus_game_event(message.event, voice_agent_originated=message.voice_agent_originated)
         elif isinstance(message, BusSteerTaskMessage):
             if self._active_task_id and message.task_id == self._active_task_id:
                 await self._inject_steering(message.text)
 
-    async def _handle_bus_game_event(self, event: Dict[str, Any]) -> None:
+    async def _handle_bus_game_event(self, event: Dict[str, Any], *, voice_agent_originated: bool = False) -> None:
         """Filter and process a game event received from the bus."""
+        # Discard errors from VoiceAgent's own tool calls before any path-matching.
+        # All errors through EventRelay come from VoiceAgent's game_client; TaskAgents
+        # receive their own errors via exceptions. The player.id field on real server
+        # errors would otherwise match the character-scoped filter below, bypassing
+        # the ambient-error guard.
+        if voice_agent_originated and event.get("event_name") == "error":
+            return
+
         event_task_id = self._extract_event_task_id(event)
         # Events tagged with our task_id
         if event_task_id and event_task_id == self._active_task_id:
@@ -447,7 +455,8 @@ class TaskAgent(LLMAgent):
         response_data = summary or event.get("payload")
         serialized = self._serialize_output(response_data)
         event_text = f"{event_name}: {serialized}" if event_name else serialized
-        self._output(event_text, TaskOutputType.EVENT)
+        output_type = TaskOutputType.ERROR if event_name == "error" else TaskOutputType.EVENT
+        self._output(event_text, output_type)
 
         if self._idle_wait_event and not self._idle_wait_event.is_set():
             self._idle_wait_event.set()

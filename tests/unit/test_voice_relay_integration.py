@@ -72,7 +72,7 @@ class RelayVoiceHarness:
         self.bus_events: list[dict] = []
         original_broadcast = self.voice_agent.broadcast_game_event
 
-        async def _capture_broadcast(event):
+        async def _capture_broadcast(event, *, voice_agent_originated: bool = False):
             self.bus_events.append(event)
 
         self.voice_agent.broadcast_game_event = _capture_broadcast

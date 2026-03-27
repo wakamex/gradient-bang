@@ -8,10 +8,12 @@ real TaskAgent pipeline with a scripted LLM, and real event relay routing.
 """
 
 import asyncio
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from pipecat.frames.frames import LLMRunFrame
 from pipecat.services.llm_service import FunctionCallParams
 
 from gradientbang.pipecat_server.subagents.task_agent import TaskAgent
@@ -571,4 +573,197 @@ class TestFullVoiceLoopE2E:
                 f"Got: {[c[:80] for c, _ in h.llm_messages]}"
             )
         finally:
+            await h.stop()
+
+
+# ── Inference coalescing ──────────────────────────────────────────────
+
+
+@pytest.mark.integration
+class TestInferenceCoalescingE2E:
+    """Inference deduplication: same-tick coalescing and LLM-inflight deferral.
+
+    REGRESSION: multiple events arriving close together previously triggered
+    multiple LLM inferences, causing back-to-back repeated responses.
+    """
+
+    @pytest.fixture(autouse=True)
+    async def setup(self, reset_db_with_characters, edge_api, make_game_client):
+        await reset_db_with_characters(["test_inference_coalesce_p1"])
+        self.character_id = canonicalize_character_id("test_inference_coalesce_p1")
+        self.api = edge_api
+        self.make_game_client = make_game_client
+
+    async def test_n_simultaneous_completions_single_run_frame(self):
+        """N inject_context(run_llm=True) with LLM idle → exactly 1 LLMRunFrame.
+
+        Simulates N corp-ship tasks completing simultaneously with no inference
+        currently in progress. Each fires inject_context(run_llm=True); only one
+        LLMRunFrame should reach the pipeline.
+        """
+        h = E2EHarness(self.character_id, self.api, self.make_game_client)
+        await h.start()
+        try:
+            await h.join_game()
+            h.llm_run_frames.clear()
+
+            await asyncio.gather(
+                h.voice_agent.inject_context(
+                    [{"role": "user", "content": "task.completed 1"}], run_llm=True
+                ),
+                h.voice_agent.inject_context(
+                    [{"role": "user", "content": "task.completed 2"}], run_llm=True
+                ),
+                h.voice_agent.inject_context(
+                    [{"role": "user", "content": "task.completed 3"}], run_llm=True
+                ),
+            )
+            await asyncio.sleep(0.05)  # allow _emit_coalesced_run to fire
+
+            assert len(h.llm_run_frames) == 1, (
+                f"Expected exactly 1 LLMRunFrame for 3 simultaneous completions, "
+                f"got {len(h.llm_run_frames)}"
+            )
+        finally:
+            await h.stop()
+
+    async def test_task_completion_while_llm_speaking_deferred(self):
+        """Task completion arriving while VoiceAgent LLM is inflight defers until speech ends.
+
+        REGRESSION: when a garrison deployment completes while the LLM is already
+        responding to a status question, the garrison outcome was previously queued
+        as an immediate second LLMRunFrame, causing back-to-back responses.
+        """
+        h = E2EHarness(self.character_id, self.api, self.make_game_client)
+        await h.start()
+        try:
+            await h.join_game()
+            h.llm_run_frames.clear()
+
+            # Simulate LLM mid-response (e.g. answering a status question)
+            h.voice_agent._llm_response_inflight = True
+
+            await h.voice_agent.inject_context(
+                [{"role": "user", "content": "<event name=\"task.completed\">garrison deployed</event>"}],
+                run_llm=True,
+            )
+            await asyncio.sleep(0.05)
+
+            # Should not have fired yet — deferred until LLM finishes
+            assert len(h.llm_run_frames) == 0, (
+                f"LLMRunFrame should be deferred while LLM is inflight, "
+                f"got {len(h.llm_run_frames)}"
+            )
+            assert h.voice_agent._deferred_after_response is True
+
+            # Simulate LLMFullResponseEndFrame arriving (triggers the on_ready handler)
+            h.voice_agent._llm_response_inflight = False
+            h.voice_agent._deferred_after_response = False
+            await h.voice_agent.queue_frame(LLMRunFrame())
+
+            assert len(h.llm_run_frames) == 1, (
+                f"Expected exactly 1 LLMRunFrame after LLM finishes speaking, "
+                f"got {len(h.llm_run_frames)}"
+            )
+        finally:
+            await h.stop()
+
+
+# ── Voice-agent error isolation ───────────────────────────────────────────
+
+
+@pytest.mark.integration
+class TestVoiceAgentErrorIsolationE2E:
+    """VoiceAgent tool errors must not bleed into TaskAgent completion tracking.
+
+    Regression: synthesized error events (e.g. my_status → 409 in hyperspace)
+    were broadcast unconditionally to all TaskAgents via the bus. A TaskAgent
+    waiting on _awaiting_completion_event would treat any error as its own
+    completion signal, clearing the wait and triggering premature inference.
+
+    Fix: EventRelay stamps BusGameEventMessage with voice_agent_originated=True
+    when an error has a source.request_id (always true for synthesized errors,
+    since all errors through EventRelay come from VoiceAgent's game_client).
+    TaskAgent discards those without touching its state.
+    """
+
+    @pytest.fixture(autouse=True)
+    async def setup(self, reset_db_with_characters, edge_api, make_game_client):
+        await reset_db_with_characters(["test_error_isolation_p1"])
+        self.character_id = canonicalize_character_id("test_error_isolation_p1")
+        self.api = edge_api
+        self.make_game_client = make_game_client
+
+    async def test_voice_error_does_not_unblock_task_async_wait(self):
+        """Synthesized voice-agent error must not clear _awaiting_completion_event.
+
+        Scenario: TaskAgent is waiting for movement.complete. VoiceAgent calls
+        my_status directly and gets a 409 (character in hyperspace). The resulting
+        synthesized error event is broadcast to the bus. TaskAgent must ignore it
+        and remain blocked on movement.complete — not proceed with inference.
+        """
+        h = E2EHarness(self.character_id, self.api, self.make_game_client)
+        await h.start()
+        try:
+            await h.join_game()
+
+            # Gate keeps the task alive long enough to inspect mid-execution state
+            h._task_llm_gate = asyncio.Event()
+            h.set_task_script([("my_status", {})])
+            result = await h.start_player_task("Background task awaiting async completion")
+            assert result["success"] is True
+
+            # Wait for TaskAgent to be created and assigned its active task
+            task_agent = None
+            for _ in range(40):
+                task_agent = next(
+                    (c for c in h.voice_agent.children if isinstance(c, TaskAgent)),
+                    None,
+                )
+                if task_agent and task_agent._active_task_id:
+                    break
+                await asyncio.sleep(0.05)
+            assert task_agent is not None, "TaskAgent should have been created"
+            assert task_agent._active_task_id, "TaskAgent should have an active task ID"
+
+            # Simulate the task having issued an async move call
+            task_agent._awaiting_completion_event = "movement.complete"
+            initial_error_count = task_agent._consecutive_error_count
+
+            # Inject an error event matching the real server structure when
+            # VoiceAgent's my_status fails (e.g. character is in hyperspace).
+            # Critically: the real server event includes player.id, which would
+            # match the character-scoped filter and bypass the ambient-error guard
+            # if voice_agent_originated were not checked first.
+            voice_error_event = {
+                "event_name": "error",
+                "payload": {
+                    "error": "Character is in hyperspace, status unavailable until arrival",
+                    "player": {"id": self.character_id},
+                    "source": {
+                        "type": "rpc",
+                        "method": "my_status",
+                        "request_id": str(uuid.uuid4()),
+                    },
+                    "status": 409,
+                    "endpoint": "my_status",
+                },
+            }
+            await h.relay._relay_event(voice_error_event)
+            await asyncio.sleep(0.05)  # let any async propagation settle
+
+            # TaskAgent must still be waiting — error must not have unblocked it
+            assert task_agent._awaiting_completion_event == "movement.complete", (
+                "TaskAgent._awaiting_completion_event was cleared by a VoiceAgent error. "
+                f"Got: {task_agent._awaiting_completion_event!r}"
+            )
+
+            # Error must not be counted against the TaskAgent's consecutive error limit
+            assert task_agent._consecutive_error_count == initial_error_count, (
+                f"VoiceAgent error incremented TaskAgent._consecutive_error_count. "
+                f"Before: {initial_error_count}, After: {task_agent._consecutive_error_count}"
+            )
+        finally:
+            if h._task_llm_gate:
+                h._task_llm_gate.set()
             await h.stop()

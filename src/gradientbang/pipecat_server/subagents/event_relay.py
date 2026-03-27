@@ -379,7 +379,7 @@ class TaskStateProvider(Protocol):
     """Callbacks that EventRelay needs from the task-state owner (VoiceAgent)."""
 
     # Event distribution to TaskAgent children via bus
-    async def broadcast_game_event(self, event: Dict[str, Any]) -> None: ...
+    async def broadcast_game_event(self, event: Dict[str, Any], *, voice_agent_originated: bool = False) -> None: ...
 
     # Task awareness (for routing decisions)
     def is_our_task(self, task_id: str) -> bool: ...
@@ -538,7 +538,7 @@ class EventRelay:
         else:
             logger.info("Onboarding: veteran player, normal startup")
             await self._deliver_llm_event(
-                '<event name="session.start">\nSession started.\n</event>',
+                '<event name="session.start"></event>',
                 should_run_llm=True,
             )
 
@@ -737,9 +737,6 @@ class EventRelay:
     # ── Core event router ──────────────────────────────────────────────
 
     async def _relay_event(self, event: Dict[str, Any]) -> None:
-        # Broadcast every event to the bus for TaskAgent children
-        await self._task_state.broadcast_game_event(event)
-
         # ── Phase 1: Parse ──
         event_name = event.get("event_name")
         payload = event.get("payload")
@@ -747,6 +744,36 @@ class EventRelay:
         clean_payload = self._strip_internal_event_metadata(payload)
         event_context = self._extract_event_context(payload)
         cfg = EVENT_CONFIGS.get(event_name, _DEFAULT_CONFIG)
+
+        # Detect voice-agent origin before broadcasting to the bus.
+        #
+        # For non-error events: check the top-level request_id against
+        # VoiceAgent's recent-request cache (set on successful tool calls).
+        #
+        # For error events: cache-based detection doesn't work because errors
+        # are synthesized and emitted *before* the exception returns to the
+        # VoiceAgent handler, so the request_id is never cached. Instead, rely
+        # on the architectural fact: all errors flowing through EventRelay come
+        # from VoiceAgent's game_client — TaskAgents have their own client and
+        # receive their own errors via exceptions, never via the bus. A
+        # source.request_id being present (always true for synthesized errors)
+        # is sufficient to confirm it's a VoiceAgent API call error.
+        if event_name == "error":
+            _src_rid = None
+            if isinstance(payload, Mapping):
+                src = payload.get("source")
+                if isinstance(src, Mapping):
+                    _src_rid = src.get("request_id")
+            is_voice_originated = _src_rid is not None
+        else:
+            is_voice_originated = (
+                self._task_state.is_recent_request_id(request_id)
+                if request_id
+                else False
+            )
+
+        # Broadcast every event to the bus for TaskAgent children
+        await self._task_state.broadcast_game_event(event, voice_agent_originated=is_voice_originated)
 
         direct_recipient = self._is_direct_recipient_event(event_context)
         in_participants = _is_player_participant(self, clean_payload)

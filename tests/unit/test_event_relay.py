@@ -34,7 +34,7 @@ class StubTaskState:
         self.deferred_events: list[tuple[str, bool]] = []
         self.broadcast_events: list[dict] = []
 
-    async def broadcast_game_event(self, event: Dict[str, Any]) -> None:
+    async def broadcast_game_event(self, event: Dict[str, Any], *, voice_agent_originated: bool = False) -> None:
         self.broadcast_events.append(event)
 
     def is_our_task(self, task_id: str) -> bool:

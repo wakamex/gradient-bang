@@ -348,13 +348,25 @@ class E2EHarness:
 
         self.voice_agent.queue_frame_after_tools = _capture_queue
 
+        # Capture LLMRunFrames delivered to VoiceAgent pipeline
+        from pipecat.frames.frames import LLMRunFrame as _LLMRunFrame
+        self.llm_run_frames: list = []
+        _orig_qf = self.voice_agent.queue_frame
+
+        async def _capture_run_frame(frame):
+            if isinstance(frame, _LLMRunFrame):
+                self.llm_run_frames.append(frame)
+            await _orig_qf(frame)
+
+        self.voice_agent.queue_frame = _capture_run_frame
+
         # Capture bus broadcasts (while still delivering to real bus)
         self.bus_events: list[dict] = []
         original_broadcast = self.voice_agent.broadcast_game_event
 
-        async def _capture_broadcast(event):
+        async def _capture_broadcast(event, *, voice_agent_originated: bool = False):
             self.bus_events.append(event)
-            await original_broadcast(event)
+            await original_broadcast(event, voice_agent_originated=voice_agent_originated)
 
         self.voice_agent.broadcast_game_event = _capture_broadcast
 
