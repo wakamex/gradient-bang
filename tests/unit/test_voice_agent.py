@@ -1,5 +1,6 @@
 """Tests for VoiceAgent framework wiring and task management."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -168,288 +169,288 @@ class TestDeferredEventBatching:
         frame = LLMMessagesAppendFrame(
             messages=[{"role": "user", "content": "<event>test</event>"}], run_llm=True,
         )
-        await agent.queue_frame_after_tools(frame)
+        await agent.queue_frame(frame)
         assert len(agent._deferred_frames) == 1
 
     async def test_flush_deferred(self):
-        from pipecat.frames.frames import LLMMessagesAppendFrame
+        """Deferred frames are silently appended: run_llm stripped, no LLMRunFrame."""
+        from pipecat.frames.frames import LLMMessagesAppendFrame, LLMRunFrame
+        from pipecat.processors.frame_processor import FrameDirection
 
         agent = _make_voice_agent()
-        agent.queue_frame = AsyncMock()
-        agent._tool_call_inflight = 1
-        await agent.queue_frame_after_tools(
-            LLMMessagesAppendFrame(messages=[{"role": "user", "content": "a"}], run_llm=True)
-        )
-        await agent.queue_frame_after_tools(
-            LLMMessagesAppendFrame(messages=[{"role": "user", "content": "b"}], run_llm=False)
-        )
-        agent._tool_call_inflight = 0
-        await agent._flush_deferred_frames()
-        assert len(agent._deferred_frames) == 0
-        # 2 AppendFrames (run_llm suppressed) + 1 LLMRunFrame
-        assert agent.queue_frame.call_count == 3
+        frames = [
+            (LLMMessagesAppendFrame(messages=[{"role": "user", "content": "a"}], run_llm=True), FrameDirection.DOWNSTREAM),
+            (LLMMessagesAppendFrame(messages=[{"role": "user", "content": "b"}], run_llm=False), FrameDirection.DOWNSTREAM),
+        ]
+        result = await agent.process_deferred_tool_frames(frames)
+        appends = [f for f, _ in result if isinstance(f, LLMMessagesAppendFrame)]
+        runs = [f for f, _ in result if isinstance(f, LLMRunFrame)]
+        assert len(appends) == 2
+        assert len(runs) == 0
 
     async def test_flush_coalesces_run_llm(self):
-        """Multiple deferred run_llm=True frames produce a single LLMRunFrame."""
+        """Multiple deferred run_llm=True frames are silently appended without triggering inference."""
         from pipecat.frames.frames import LLMMessagesAppendFrame, LLMRunFrame
+        from pipecat.processors.frame_processor import FrameDirection
 
         agent = _make_voice_agent()
-        agent.queue_frame = AsyncMock()
-        agent._tool_call_inflight = 1
+        frames = [
+            (LLMMessagesAppendFrame(messages=[{"role": "user", "content": c}], run_llm=True), FrameDirection.DOWNSTREAM)
+            for c in ("event_a", "event_b", "event_c")
+        ]
+        result = await agent.process_deferred_tool_frames(frames)
 
-        # Queue 3 frames with run_llm=True while tool is active
-        for content in ("event_a", "event_b", "event_c"):
-            await agent.queue_frame_after_tools(
-                LLMMessagesAppendFrame(
-                    messages=[{"role": "user", "content": content}], run_llm=True
-                )
-            )
-        assert len(agent._deferred_frames) == 3
-
-        agent._tool_call_inflight = 0
-        await agent._flush_deferred_frames()
-
-        # 3 AppendFrames (all run_llm=False) + 1 LLMRunFrame at the end
-        assert agent.queue_frame.call_count == 4
-        flushed = [call.args[0] for call in agent.queue_frame.call_args_list]
-        appends = [f for f in flushed if isinstance(f, LLMMessagesAppendFrame)]
-        runs = [f for f in flushed if isinstance(f, LLMRunFrame)]
+        appends = [f for f, _ in result if isinstance(f, LLMMessagesAppendFrame)]
+        runs = [f for f, _ in result if isinstance(f, LLMRunFrame)]
         assert all(f.run_llm is False for f in appends)
-        assert len(runs) == 1
-        # All messages preserved in order
+        assert len(runs) == 0
         assert [f.messages[0]["content"] for f in appends] == ["event_a", "event_b", "event_c"]
 
-    async def test_flush_single_frame_sends_run_frame(self):
-        """A single deferred frame with run_llm=True still produces an LLMRunFrame."""
+    async def test_flush_single_frame_silently_appends(self):
+        """A single deferred frame with run_llm=True is silently appended without inference."""
         from pipecat.frames.frames import LLMMessagesAppendFrame, LLMRunFrame
+        from pipecat.processors.frame_processor import FrameDirection
 
         agent = _make_voice_agent()
-        agent.queue_frame = AsyncMock()
-        agent._tool_call_inflight = 1
-        await agent.queue_frame_after_tools(
-            LLMMessagesAppendFrame(messages=[{"role": "user", "content": "only"}], run_llm=True)
-        )
-        agent._tool_call_inflight = 0
-        await agent._flush_deferred_frames()
+        frames = [
+            (LLMMessagesAppendFrame(messages=[{"role": "user", "content": "only"}], run_llm=True), FrameDirection.DOWNSTREAM)
+        ]
+        result = await agent.process_deferred_tool_frames(frames)
 
-        assert agent.queue_frame.call_count == 2
-        flushed = [call.args[0] for call in agent.queue_frame.call_args_list]
-        assert isinstance(flushed[0], LLMMessagesAppendFrame)
-        assert flushed[0].run_llm is False
-        assert isinstance(flushed[1], LLMRunFrame)
+        appends = [f for f, _ in result if isinstance(f, LLMMessagesAppendFrame)]
+        runs = [f for f, _ in result if isinstance(f, LLMRunFrame)]
+        assert len(appends) == 1
+        assert appends[0].run_llm is False
+        assert len(runs) == 0
 
     async def test_flush_no_run_llm_skips_run_frame(self):
         """Deferred frames with run_llm=False don't produce an LLMRunFrame."""
         from pipecat.frames.frames import LLMMessagesAppendFrame, LLMRunFrame
+        from pipecat.processors.frame_processor import FrameDirection
 
         agent = _make_voice_agent()
-        agent.queue_frame = AsyncMock()
-        agent._tool_call_inflight = 1
-        await agent.queue_frame_after_tools(
-            LLMMessagesAppendFrame(messages=[{"role": "user", "content": "a"}], run_llm=False)
-        )
-        agent._tool_call_inflight = 0
-        await agent._flush_deferred_frames()
+        frames = [
+            (LLMMessagesAppendFrame(messages=[{"role": "user", "content": "a"}], run_llm=False), FrameDirection.DOWNSTREAM)
+        ]
+        result = await agent.process_deferred_tool_frames(frames)
 
-        assert agent.queue_frame.call_count == 1
-        flushed = [call.args[0] for call in agent.queue_frame.call_args_list]
-        assert isinstance(flushed[0], LLMMessagesAppendFrame)
-        assert not any(isinstance(f, LLMRunFrame) for f in flushed)
+        appends = [f for f, _ in result if isinstance(f, LLMMessagesAppendFrame)]
+        runs = [f for f, _ in result if isinstance(f, LLMRunFrame)]
+        assert len(appends) == 1
+        assert not any(isinstance(f, LLMRunFrame) for f in runs)
 
-    async def test_concurrent_inject_context_coalesces_to_single_run(self):
-        """N inject_context(run_llm=True) calls without tool inflight → exactly 1 LLMRunFrame.
+    async def test_concurrent_inject_context_silently_appends(self):
+        """N deferred run_llm=True frames → 0 LLMRunFrames via process_deferred_tool_frames.
 
-        REGRESSION: when 3 corp-ship trade tasks complete simultaneously each
-        fires on_task_response → inject_context(run_llm=True).  Without
-        coalescing this pushes 3 LLMMessagesAppendFrame(run_llm=True) frames
-        directly to the VoiceAgent pipeline, triggering 3 sequential inferences
-        all of which answer the same user question.
+        Deferred events are silently appended to context without triggering inference.
+        The tool result already gets its own inference via function calling.
         """
-        import asyncio
-
         from pipecat.frames.frames import LLMMessagesAppendFrame, LLMRunFrame
+        from pipecat.processors.frame_processor import FrameDirection
 
         agent = _make_voice_agent()
-        agent.queue_frame = AsyncMock()
+        frames = [
+            (LLMMessagesAppendFrame(messages=[{"role": "user", "content": f"task{i}"}], run_llm=True), FrameDirection.DOWNSTREAM)
+            for i in range(3)
+        ]
+        result = await agent.process_deferred_tool_frames(frames)
 
-        # Simulate 3 task completions arriving in the same asyncio iteration
-        await asyncio.gather(
-            agent.inject_context([{"role": "user", "content": "task1"}], run_llm=True),
-            agent.inject_context([{"role": "user", "content": "task2"}], run_llm=True),
-            agent.inject_context([{"role": "user", "content": "task3"}], run_llm=True),
-        )
-        await asyncio.sleep(0.01)  # allow the deferred LLMRunFrame task to fire
-
-        flushed = [call.args[0] for call in agent.queue_frame.call_args_list]
-        appends = [f for f in flushed if isinstance(f, LLMMessagesAppendFrame)]
-        runs = [f for f in flushed if isinstance(f, LLMRunFrame)]
-
+        appends = [f for f, _ in result if isinstance(f, LLMMessagesAppendFrame)]
+        runs = [f for f, _ in result if isinstance(f, LLMRunFrame)]
         assert len(appends) == 3
         assert all(f.run_llm is False for f in appends)
-        assert len(runs) == 1, f"Expected 1 LLMRunFrame but got {len(runs)}: {runs}"
+        assert len(runs) == 0, f"Expected 0 LLMRunFrames but got {len(runs)}"
 
-    async def test_queue_frame_after_tools_coalesces_mixed_sources(self):
-        """Frames from different sources (EventRelay + bus protocol) coalesce to 1 LLMRunFrame.
+    async def test_queue_frame_after_tools_silently_appends_mixed_sources(self):
+        """Mixed deferred frames (run_llm=True + run_llm=True) → 0 LLMRunFrames.
 
-        EventRelay uses queue_frame_after_tools directly (not inject_context).
-        When a status.snapshot (VOICE_AGENT inference rule, run_llm=True) and a
-        task.completed bus message both arrive in the same asyncio tick with no
-        tool inflight, both previously triggered separate inferences.
+        Verifies silent append when frames come from different sources (EventRelay +
+        bus protocol) but are both deferred during a tool call. No inference triggered.
         """
-        import asyncio
-
         from pipecat.frames.frames import LLMMessagesAppendFrame, LLMRunFrame
+        from pipecat.processors.frame_processor import FrameDirection
 
         agent = _make_voice_agent()
-        agent.queue_frame = AsyncMock()
+        frames = [
+            (LLMMessagesAppendFrame(messages=[{"role": "user", "content": "<event name=\"status.snapshot\">...</event>"}], run_llm=True), FrameDirection.DOWNSTREAM),
+            (LLMMessagesAppendFrame(messages=[{"role": "user", "content": "<event name=\"task.completed\">...</event>"}], run_llm=True), FrameDirection.DOWNSTREAM),
+        ]
+        result = await agent.process_deferred_tool_frames(frames)
 
-        # Simulate EventRelay delivering status.snapshot (run_llm=True) and
-        # inject_context delivering task.completed (run_llm=True) simultaneously
-        event_relay_frame = LLMMessagesAppendFrame(
-            messages=[{"role": "user", "content": "<event name=\"status.snapshot\">...</event>"}],
-            run_llm=True,
-        )
-        task_completed_frame = LLMMessagesAppendFrame(
-            messages=[{"role": "user", "content": "<event name=\"task.completed\">...</event>"}],
-            run_llm=True,
-        )
-        await asyncio.gather(
-            agent.queue_frame_after_tools(event_relay_frame),
-            agent.queue_frame_after_tools(task_completed_frame),
-        )
-        await asyncio.sleep(0.01)
-
-        flushed = [call.args[0] for call in agent.queue_frame.call_args_list]
-        appends = [f for f in flushed if isinstance(f, LLMMessagesAppendFrame)]
-        runs = [f for f in flushed if isinstance(f, LLMRunFrame)]
-
+        appends = [f for f, _ in result if isinstance(f, LLMMessagesAppendFrame)]
+        runs = [f for f, _ in result if isinstance(f, LLMRunFrame)]
         assert len(appends) == 2
         assert all(f.run_llm is False for f in appends)
-        assert len(runs) == 1, f"Expected 1 LLMRunFrame but got {len(runs)}: {runs}"
-
-    async def test_emit_coalesced_run_defers_when_llm_inflight(self):
-        """When LLM is speaking, _emit_coalesced_run sets deferred flag instead of emitting.
-
-        REGRESSION: task.completed arriving while the LLM is mid-response previously
-        queued a second LLMRunFrame immediately, causing a back-to-back double-response.
-        """
-        import asyncio
-
-        from pipecat.frames.frames import LLMRunFrame
-
-        agent = _make_voice_agent()
-        agent.queue_frame = AsyncMock()
-        agent._llm_response_inflight = True  # simulate LLM speaking
-
-        await agent.inject_context([{"role": "user", "content": "task.completed"}], run_llm=True)
-        await asyncio.sleep(0.01)
-
-        runs = [c.args[0] for c in agent.queue_frame.call_args_list
-                if isinstance(c.args[0], LLMRunFrame)]
-        assert len(runs) == 0, "Should not fire LLMRunFrame while LLM is inflight"
-        assert agent._deferred_after_response is True
-
-    async def test_deferred_run_fires_on_llm_response_end(self):
-        """N task completions while LLM speaking → deferred → 1 LLMRunFrame when speech ends.
-
-        Simulates the on_ready lifecycle handler triggering after LLMFullResponseEndFrame.
-        """
-        import asyncio
-
-        from pipecat.frames.frames import LLMRunFrame
-
-        agent = _make_voice_agent()
-        agent.queue_frame = AsyncMock()
-        agent._llm_response_inflight = True
-
-        # Three completions arrive while LLM is speaking
-        await asyncio.gather(
-            agent.inject_context([{"role": "user", "content": "task1"}], run_llm=True),
-            agent.inject_context([{"role": "user", "content": "task2"}], run_llm=True),
-            agent.inject_context([{"role": "user", "content": "task3"}], run_llm=True),
-        )
-        await asyncio.sleep(0.01)
-        assert agent._deferred_after_response is True
-
-        # Simulate LLMFullResponseEndFrame arriving (what the on_ready handler does)
-        agent._llm_response_inflight = False
-        agent._deferred_after_response = False
-        await agent.queue_frame(LLMRunFrame())
-
-        runs = [c.args[0] for c in agent.queue_frame.call_args_list
-                if isinstance(c.args[0], LLMRunFrame)]
-        assert len(runs) == 1
+        assert len(runs) == 0, f"Expected 0 LLMRunFrames but got {len(runs)}"
 
     async def test_process_deferred_tool_frames_hook(self):
-        """process_deferred_tool_frames coalesces run_llm and appends LLMRunFrame."""
+        """process_deferred_tool_frames strips run_llm without appending LLMRunFrame."""
         from pipecat.frames.frames import LLMMessagesAppendFrame, LLMRunFrame
+        from pipecat.processors.frame_processor import FrameDirection
 
         agent = _make_voice_agent()
         frames = [
-            LLMMessagesAppendFrame(messages=[{"role": "user", "content": "a"}], run_llm=True),
-            LLMMessagesAppendFrame(messages=[{"role": "user", "content": "b"}], run_llm=True),
-            LLMMessagesAppendFrame(messages=[{"role": "user", "content": "c"}], run_llm=False),
+            (LLMMessagesAppendFrame(messages=[{"role": "user", "content": "a"}], run_llm=True), FrameDirection.DOWNSTREAM),
+            (LLMMessagesAppendFrame(messages=[{"role": "user", "content": "b"}], run_llm=True), FrameDirection.DOWNSTREAM),
+            (LLMMessagesAppendFrame(messages=[{"role": "user", "content": "c"}], run_llm=False), FrameDirection.DOWNSTREAM),
         ]
         result = await agent.process_deferred_tool_frames(frames)
-        # All run_llm suppressed, single LLMRunFrame appended
-        appends = [f for f in result if isinstance(f, LLMMessagesAppendFrame)]
-        runs = [f for f in result if isinstance(f, LLMRunFrame)]
+        appends = [f for f, _ in result if isinstance(f, LLMMessagesAppendFrame)]
+        runs = [f for f, _ in result if isinstance(f, LLMRunFrame)]
         assert all(f.run_llm is False for f in appends)
-        assert len(runs) == 1
-        assert len(result) == 4  # 3 appends + 1 run frame
+        assert len(runs) == 0
+        assert len(result) == 3  # 3 appends, no run frame
 
-    async def test_emit_coalesced_run_defers_when_tool_inflight(self):
-        """task.completed schedules run (tool idle), tool starts before sleep(0) yields → defers.
-
-        Real scenario: task.completed arrives (no tool running) → _emit_coalesced_run scheduled.
-        Then my_status tool call starts (_tool_call_inflight increments) before the scheduled
-        coroutine gets its first asyncio tick. On tick, _emit_coalesced_run sees tool inflight
-        and defers via _deferred_after_response instead of firing LLMRunFrame.
-        """
-        import asyncio
-
-        from pipecat.frames.frames import LLMRunFrame
+    async def test_queue_frame_defers_when_tool_inflight(self):
+        """Frames are deferred when a tool call is in-flight."""
+        from pipecat.frames.frames import LLMMessagesAppendFrame
+        from pipecat.processors.frame_processor import FrameDirection
 
         agent = _make_voice_agent()
-        agent.queue_frame = AsyncMock()
-        # Tool is idle — inject_context schedules _emit_coalesced_run
-        await agent.inject_context([{"role": "user", "content": "task.completed"}], run_llm=True)
-        # Tool starts before the scheduled coroutine gets its tick
         agent._tool_call_inflight = 1
-        await asyncio.sleep(0.01)
+        frame = LLMMessagesAppendFrame(messages=[{"role": "user", "content": "task.completed"}], run_llm=True)
+        await agent.queue_frame(frame)
 
-        runs = [c.args[0] for c in agent.queue_frame.call_args_list
-                if isinstance(c.args[0], LLMRunFrame)]
-        assert len(runs) == 0, "Should not fire LLMRunFrame while tool is inflight"
-        assert agent._deferred_after_response is True
+        assert len(agent._deferred_frames) == 1
+        deferred_frame, direction = agent._deferred_frames[0]
+        assert deferred_frame is frame
+        assert direction == FrameDirection.DOWNSTREAM
 
-    async def test_process_deferred_frames_consumes_deferred_after_response(self):
-        """_deferred_after_response + status.snapshot deferred → ONE LLMRunFrame on flush."""
+    async def test_process_deferred_frames_strip_run_llm(self):
+        """Deferred run_llm=True frame → silently appended, no LLMRunFrame."""
         from pipecat.frames.frames import LLMMessagesAppendFrame, LLMRunFrame
+        from pipecat.processors.frame_processor import FrameDirection
 
         agent = _make_voice_agent()
-        agent._deferred_after_response = True  # set by _emit_coalesced_run when tool was inflight
-
         frames = [
-            LLMMessagesAppendFrame(messages=[{"role": "user", "content": "status.snapshot"}], run_llm=True)
+            (LLMMessagesAppendFrame(messages=[{"role": "user", "content": "status.snapshot"}], run_llm=True), FrameDirection.DOWNSTREAM)
         ]
         result = await agent.process_deferred_tool_frames(frames)
 
-        runs = [f for f in result if isinstance(f, LLMRunFrame)]
-        assert len(runs) == 1
-        assert agent._deferred_after_response is False
+        runs = [f for f, _ in result if isinstance(f, LLMRunFrame)]
+        assert len(runs) == 0
 
     async def test_process_deferred_frames_deferred_only_no_status_snapshot(self):
-        """_deferred_after_response=True but no deferred frames → still fires ONE LLMRunFrame."""
+        """Empty deferred frames → no LLMRunFrame added by process_deferred_tool_frames."""
         from pipecat.frames.frames import LLMRunFrame
 
         agent = _make_voice_agent()
-        agent._deferred_after_response = True
-
         result = await agent.process_deferred_tool_frames([])
-        runs = [f for f in result if isinstance(f, LLMRunFrame)]
-        assert len(runs) == 1
-        assert agent._deferred_after_response is False
+        runs = [f for f, _ in result if isinstance(f, LLMRunFrame)]
+        assert len(runs) == 0
+
+
+@pytest.mark.unit
+class TestTaskCompletionCooldown:
+    @staticmethod
+    def _make_task_response(agent: VoiceAgent):
+        from gradientbang.subagents.agents import TaskStatus
+        from gradientbang.subagents.bus.messages import BusTaskResponseMessage
+
+        child = MagicMock()
+        child.name = "task_abc123"
+        child._is_corp_ship = False
+        child._game_client = agent._game_client
+        agent._children = [child]
+
+        message = BusTaskResponseMessage(
+            source=child.name,
+            task_id="tid-1",
+            status=TaskStatus.COMPLETED,
+            response={"message": "Task done"},
+        )
+        return child, message
+
+    @staticmethod
+    def _stub_task_completion(agent: VoiceAgent) -> AsyncMock:
+        agent._task_output_handler = AsyncMock()
+        agent.send_message = AsyncMock()
+        agent._update_polling_scope = MagicMock()
+        agent._queue_task_completion_event = AsyncMock()
+        return agent._queue_task_completion_event
+
+    async def test_waits_through_llm_end_to_speech_start_gap(self, monkeypatch):
+        import gradientbang.pipecat_server.subagents.voice_agent as voice_agent_module
+
+        monkeypatch.setattr(voice_agent_module, "TASK_RESPONSE_COOLDOWN_SECONDS", 0.0)
+        monkeypatch.setattr(
+            voice_agent_module,
+            "TASK_RESPONSE_SPEECH_START_GRACE_SECONDS",
+            1.0,
+        )
+
+        agent = _make_voice_agent()
+        queue_completion = self._stub_task_completion(agent)
+        _, message = self._make_task_response(agent)
+
+        agent._handle_llm_response_started()
+        agent._handle_llm_response_ended()
+
+        response_task = asyncio.create_task(agent.on_task_response(message))
+        await asyncio.sleep(0)
+        queue_completion.assert_not_awaited()
+
+        agent._handle_bot_started_speaking()
+        await asyncio.sleep(0)
+        queue_completion.assert_not_awaited()
+
+        agent._handle_bot_stopped_speaking()
+        await asyncio.wait_for(response_task, timeout=0.5)
+        queue_completion.assert_awaited_once()
+
+    async def test_speech_start_grace_releases_silent_response_cycle(self, monkeypatch):
+        import gradientbang.pipecat_server.subagents.voice_agent as voice_agent_module
+
+        monkeypatch.setattr(voice_agent_module, "TASK_RESPONSE_COOLDOWN_SECONDS", 0.0)
+        monkeypatch.setattr(
+            voice_agent_module,
+            "TASK_RESPONSE_SPEECH_START_GRACE_SECONDS",
+            0.01,
+        )
+
+        agent = _make_voice_agent()
+        queue_completion = self._stub_task_completion(agent)
+        _, message = self._make_task_response(agent)
+
+        agent._handle_llm_response_started()
+        agent._handle_llm_response_ended()
+
+        response_task = asyncio.create_task(agent.on_task_response(message))
+        await asyncio.sleep(0)
+        queue_completion.assert_not_awaited()
+
+        await asyncio.wait_for(response_task, timeout=0.5)
+        queue_completion.assert_awaited_once()
+        assert agent._assistant_cycle_active is False
+
+    async def test_cooldown_uses_actual_bot_stop_time(self, monkeypatch):
+        import gradientbang.pipecat_server.subagents.voice_agent as voice_agent_module
+
+        monkeypatch.setattr(voice_agent_module, "TASK_RESPONSE_COOLDOWN_SECONDS", 0.05)
+        monkeypatch.setattr(
+            voice_agent_module,
+            "TASK_RESPONSE_SPEECH_START_GRACE_SECONDS",
+            1.0,
+        )
+
+        agent = _make_voice_agent()
+        queue_completion = self._stub_task_completion(agent)
+        _, message = self._make_task_response(agent)
+
+        agent._handle_llm_response_started()
+        agent._handle_bot_started_speaking()
+        agent._handle_llm_response_ended()
+
+        response_task = asyncio.create_task(agent.on_task_response(message))
+        await asyncio.sleep(0.01)
+        queue_completion.assert_not_awaited()
+
+        agent._handle_bot_stopped_speaking()
+        await asyncio.sleep(0.02)
+        queue_completion.assert_not_awaited()
+
+        await asyncio.wait_for(response_task, timeout=0.5)
+        queue_completion.assert_awaited_once()
 
 
 # ── Task tool handlers ────────────────────────────────────────────────
@@ -665,7 +666,7 @@ class TestCorporationDirectTools:
         )
         params.result_callback.assert_called_once()
         result = params.result_callback.call_args[0][0]
-        assert result == {"status": "Executed."}
+        assert result is None
         assert agent.is_recent_request_id("req-create")
 
     @pytest.mark.asyncio
@@ -685,7 +686,7 @@ class TestCorporationDirectTools:
         )
         params.result_callback.assert_called_once()
         result = params.result_callback.call_args[0][0]
-        assert result == {"status": "Executed."}
+        assert result is None
         assert agent.is_recent_request_id("req-rename")
 
 

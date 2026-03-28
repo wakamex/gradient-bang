@@ -47,7 +47,7 @@ class StubTaskState:
     def tool_call_active(self) -> bool:
         return self.tool_call_inflight
 
-    async def queue_frame_after_tools(self, frame) -> None:
+    async def queue_frame(self, frame, direction=None) -> None:
         from pipecat.frames.frames import LLMMessagesAppendFrame
 
         if isinstance(frame, LLMMessagesAppendFrame):
@@ -1132,11 +1132,12 @@ class TestInferenceRules:
         _, run_llm = task_state.deferred_events[0]
         assert run_llm is False
 
-    async def test_owned_task_finish_appends_without_inference(self):
-        """task.finish appends for our task but does NOT trigger inference.
+    async def test_owned_task_finish_skips_voice_llm(self):
+        """task.finish stays off the voice LLM entirely.
 
-        Bus protocol (on_task_response) already injects task.completed with
-        run_llm=True.  Triggering inference here would duplicate the response.
+        Bus protocol (on_task_response) already injects task.completed. Adding
+        task.finish as a second completion message makes the assistant repeat
+        the same result.
         """
         relay, task_state, _, _ = _make_relay()
         task_state.our_task_ids.add("task-1")
@@ -1148,15 +1149,12 @@ class TestInferenceRules:
             },
         )
         await relay._relay_event(event)
-        assert len(task_state.deferred_events) == 1
-        _, run_llm = task_state.deferred_events[0]
-        assert run_llm is False
+        assert task_state.deferred_events == []
 
     async def test_owned_no_trigger_for_other_task(self):
         """InferenceRule.OWNED — False when task is not ours."""
         relay, task_state, _, _ = _make_relay()
-        # task.finish uses OWNED_TASK append
-        # Without is_our_task, it won't even append
+        # task.finish is skipped for the voice LLM even when task-scoped.
         event = _make_event(
             "task.finish",
             {
@@ -1305,8 +1303,8 @@ class TestXmlFormat:
 class TestDeferredBatching:
     """Task-scoped events deferred when tool calls are inflight."""
 
-    async def test_task_finish_deferred_suppresses_run_llm(self):
-        """task.finish deferred during tool call has run_llm=False."""
+    async def test_task_finish_deferred_is_not_queued(self):
+        """task.finish is never queued into the voice LLM, even during tool calls."""
         relay, task_state, _, _ = _make_relay()
         task_state.tool_call_inflight = True
         task_state.our_task_ids.add("task-1")
@@ -1318,9 +1316,7 @@ class TestDeferredBatching:
             },
         )
         await relay._relay_event(event)
-        assert len(task_state.deferred_events) == 1
-        _, run_llm = task_state.deferred_events[0]
-        assert run_llm is False  # task.finish suppresses run_llm when deferred
+        assert task_state.deferred_events == []
 
     async def test_non_task_event_not_deferred(self):
         """Events without task_id are delivered immediately even with tool inflight."""

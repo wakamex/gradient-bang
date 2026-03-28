@@ -50,23 +50,17 @@ class RelayVoiceHarness:
             character_id=character_id,
             rtvi_processor=self.rtvi,
         )
-        # Capture LLM frames instead of sending through pipeline
+        # Capture LLM frames - EventRelay now calls queue_frame directly
         self.llm_frames: list[LLMMessagesAppendFrame] = []
-        original_queue = self.voice_agent.queue_frame_after_tools
+        from pipecat.processors.frame_processor import FrameDirection as _FD
+        _orig_queue_frame = self.voice_agent.queue_frame
 
-        async def _capture_queue(frame):
+        async def _capturing_queue_frame(frame, direction=_FD.DOWNSTREAM):
             if isinstance(frame, LLMMessagesAppendFrame):
                 self.llm_frames.append(frame)
-            else:
-                await original_queue(frame)
+            await _orig_queue_frame(frame, direction)
 
-        self.voice_agent.queue_frame_after_tools = _capture_queue
-        # Also capture direct queue_frame calls (flushed deferred frames)
-        self.voice_agent.queue_frame = AsyncMock(
-            side_effect=lambda f: self.llm_frames.append(f)
-            if isinstance(f, LLMMessagesAppendFrame)
-            else None
-        )
+        self.voice_agent.queue_frame = _capturing_queue_frame
 
         # Capture bus broadcasts
         self.bus_events: list[dict] = []
@@ -1078,27 +1072,22 @@ class TestCombatTaskCancellation:
 
 @pytest.mark.unit
 class TestDeferredFlushCoalescing:
-    """Repro: multiple events deferred during tool call should produce one inference, not N."""
+    """Repro: multiple events deferred during tool call are silently appended without inference."""
 
-    async def test_multiple_events_during_tool_call_single_inference(self):
+    async def test_multiple_events_during_tool_call_no_inference(self):
         """Simulate travel generating multiple events while a tool is in-flight.
 
-        After flush, all AppendFrames should have run_llm=False and a single
-        LLMRunFrame should trigger inference.
+        After flush, all AppendFrames should have run_llm=False and no
+        LLMRunFrame should be produced. The tool result already gets its own
+        inference via function calling.
         """
         from pipecat.frames.frames import LLMRunFrame
+        from pipecat.processors.frame_processor import FrameDirection
 
         h = _make_harness()
 
         # Skip onboarding so it doesn't interfere
         h.relay._onboarding_complete = True
-
-        # Restore real queue_frame_after_tools (harness overrides it to capture)
-        from gradientbang.subagents.agents.llm_agent import LLMAgent
-
-        h.voice_agent.queue_frame_after_tools = LLMAgent.queue_frame_after_tools.__get__(
-            h.voice_agent
-        )
 
         # Track a request_id so EventRelay treats these as voice-agent events
         h.voice_agent.track_request_id("travel-req")
@@ -1107,7 +1096,7 @@ class TestDeferredFlushCoalescing:
         h.voice_agent._tool_call_inflight = 1
 
         # Feed multiple ports.list events through the real EventRelay while tool is active.
-        # These go through _deliver_llm_event → queue_frame_after_tools → deferred.
+        # These go through _deliver_llm_event → queue_frame → deferred (tool inflight).
         await h.feed_event(
             "ports.list",
             {
@@ -1127,14 +1116,11 @@ class TestDeferredFlushCoalescing:
 
         assert len(h.voice_agent._deferred_frames) == 2
 
-        # Complete tool → flush deferred frames
-        h.voice_agent._tool_call_inflight = 0
-        await h.voice_agent._flush_deferred_frames()
-
-        # All AppendFrames flushed with run_llm=False, plus a single LLMRunFrame
-        all_calls = [call.args[0] for call in h.voice_agent.queue_frame.call_args_list]
-        appends = [f for f in all_calls if isinstance(f, LLMMessagesAppendFrame)]
-        runs = [f for f in all_calls if isinstance(f, LLMRunFrame)]
+        # Verify: process_deferred_tool_frames strips run_llm, no LLMRunFrame appended
+        deferred = list(h.voice_agent._deferred_frames)
+        result = await h.voice_agent.process_deferred_tool_frames(deferred)
+        appends = [f for f, _ in result if isinstance(f, LLMMessagesAppendFrame)]
+        runs = [f for f, _ in result if isinstance(f, LLMRunFrame)]
         assert len(appends) == 2
         assert all(f.run_llm is False for f in appends)
-        assert len(runs) == 1  # single inference trigger
+        assert len(runs) == 0  # no inference trigger; tool result handles it

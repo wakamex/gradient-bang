@@ -337,28 +337,20 @@ class E2EHarness:
             rtvi_processor=self.rtvi,
         )
 
-        # Capture LLM frames from VoiceAgent
+        # Capture LLM frames from VoiceAgent (both LLMMessagesAppendFrame and LLMRunFrame)
         self.llm_frames: list[LLMMessagesAppendFrame] = []
-        original_queue = self.voice_agent.queue_frame_after_tools
-
-        async def _capture_queue(frame):
-            if isinstance(frame, LLMMessagesAppendFrame):
-                self.llm_frames.append(frame)
-            await original_queue(frame)
-
-        self.voice_agent.queue_frame_after_tools = _capture_queue
-
-        # Capture LLMRunFrames delivered to VoiceAgent pipeline
         from pipecat.frames.frames import LLMRunFrame as _LLMRunFrame
         self.llm_run_frames: list = []
         _orig_qf = self.voice_agent.queue_frame
 
-        async def _capture_run_frame(frame):
+        async def _capture_frames(frame, direction=FrameDirection.DOWNSTREAM):
+            if isinstance(frame, LLMMessagesAppendFrame):
+                self.llm_frames.append(frame)
             if isinstance(frame, _LLMRunFrame):
                 self.llm_run_frames.append(frame)
-            await _orig_qf(frame)
+            await _orig_qf(frame, direction)
 
-        self.voice_agent.queue_frame = _capture_run_frame
+        self.voice_agent.queue_frame = _capture_frames
 
         # Capture bus broadcasts (while still delivering to real bus)
         self.bus_events: list[dict] = []

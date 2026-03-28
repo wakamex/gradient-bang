@@ -11,6 +11,7 @@ so EventRelay can query task state during event routing.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
@@ -20,12 +21,13 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from loguru import logger
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     Frame,
     FunctionCallResultProperties,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMMessagesAppendFrame,
-    LLMRunFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.processors.frameworks.rtvi import RTVIProcessor, RTVIServerMessageFrame
@@ -58,6 +60,8 @@ if TYPE_CHECKING:
 MAX_CORP_SHIP_TASKS = 3
 REQUEST_ID_CACHE_TTL_SECONDS = 15 * 60
 REQUEST_ID_CACHE_MAX_SIZE = 5000
+TASK_RESPONSE_COOLDOWN_SECONDS = 2.0
+TASK_RESPONSE_SPEECH_START_GRACE_SECONDS = 0.75
 
 _UUID_PATTERN = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
@@ -103,31 +107,109 @@ class VoiceAgent(LLMAgent):
         self._voice_agent_request_ids: Dict[str, float] = {}
         self._voice_agent_request_queue: deque[tuple[str, float]] = deque()
 
-        # ── Inject coalescing ──
-        self._inject_run_pending: bool = False
-
         # ── LLM response lifecycle ──
         self._llm_response_inflight: bool = False
-        self._deferred_after_response: bool = False
+
+        # ── Bot speaking state (for task response cooldown) ──
+        self._bot_speaking: bool = False
+        self._bot_stopped_speaking_at: float = 0.0
+
+        # ── Assistant response lifecycle ──
+        self._assistant_cycle_active: bool = False
+        self._assistant_cycle_idle_event: asyncio.Event = asyncio.Event()
+        self._assistant_cycle_idle_event.set()
+        self._speech_start_grace_task: Optional[asyncio.Task] = None
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
     async def on_ready(self) -> None:
-        """Register downstream frame watchers for LLM response lifecycle tracking."""
+        """Register frame watchers for LLM response and bot speaking lifecycle."""
         await super().on_ready()
         self.pipeline_task.add_reached_downstream_filter(
             (LLMFullResponseStartFrame, LLMFullResponseEndFrame)
+        )
+        self.pipeline_task.add_reached_upstream_filter(
+            (BotStartedSpeakingFrame, BotStoppedSpeakingFrame)
         )
 
         @self.pipeline_task.event_handler("on_frame_reached_downstream")
         async def _on_llm_response_lifecycle(task, frame):
             if isinstance(frame, LLMFullResponseStartFrame):
-                self._llm_response_inflight = True
+                self._handle_llm_response_started()
             elif isinstance(frame, LLMFullResponseEndFrame):
-                self._llm_response_inflight = False
-                if self._deferred_after_response:
-                    self._deferred_after_response = False
-                    await self.queue_frame(LLMRunFrame())
+                self._handle_llm_response_ended()
+
+        @self.pipeline_task.event_handler("on_frame_reached_upstream")
+        async def _on_bot_speaking_lifecycle(task, frame):
+            if isinstance(frame, BotStartedSpeakingFrame):
+                self._handle_bot_started_speaking()
+            elif isinstance(frame, BotStoppedSpeakingFrame):
+                self._handle_bot_stopped_speaking()
+
+    def _cancel_speech_start_grace_task(self) -> None:
+        task = self._speech_start_grace_task
+        if task and not task.done():
+            task.cancel()
+        self._speech_start_grace_task = None
+
+    def _mark_assistant_cycle_active(self) -> None:
+        self._assistant_cycle_active = True
+        self._assistant_cycle_idle_event.clear()
+
+    def _mark_assistant_cycle_idle(self) -> None:
+        self._assistant_cycle_active = False
+        self._assistant_cycle_idle_event.set()
+
+    def _begin_assistant_response_cycle(self) -> None:
+        self._cancel_speech_start_grace_task()
+        self._mark_assistant_cycle_active()
+
+    def _handle_llm_response_started(self) -> None:
+        self._llm_response_inflight = True
+        self._begin_assistant_response_cycle()
+
+    def _handle_llm_response_ended(self) -> None:
+        self._llm_response_inflight = False
+        if self._bot_speaking:
+            return
+        self._start_speech_start_grace_timer()
+
+    def _handle_bot_started_speaking(self) -> None:
+        self._bot_speaking = True
+        self._begin_assistant_response_cycle()
+
+    def _handle_bot_stopped_speaking(self) -> None:
+        self._bot_speaking = False
+        self._cancel_speech_start_grace_task()
+        self._bot_stopped_speaking_at = time.monotonic()
+        self._mark_assistant_cycle_idle()
+
+    def _start_speech_start_grace_timer(self) -> None:
+        self._cancel_speech_start_grace_task()
+        if TASK_RESPONSE_SPEECH_START_GRACE_SECONDS <= 0:
+            self._mark_assistant_cycle_idle()
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._mark_assistant_cycle_idle()
+            return
+        self._speech_start_grace_task = loop.create_task(self._speech_start_grace_waiter())
+
+    async def _speech_start_grace_waiter(self) -> None:
+        try:
+            await asyncio.sleep(TASK_RESPONSE_SPEECH_START_GRACE_SECONDS)
+            if not self._bot_speaking and not self._llm_response_inflight:
+                logger.debug(
+                    "VoiceAgent: speech-start grace expired after {:.2f}s; marking assistant idle",
+                    TASK_RESPONSE_SPEECH_START_GRACE_SECONDS,
+                )
+                self._mark_assistant_cycle_idle()
+        except asyncio.CancelledError:
+            return
+        finally:
+            if asyncio.current_task() is self._speech_start_grace_task:
+                self._speech_start_grace_task = None
 
     # ── Properties ─────────────────────────────────────────────────────
 
@@ -199,15 +281,12 @@ class VoiceAgent(LLMAgent):
     async def process_deferred_tool_frames(
         self, frames: list[tuple[Frame, FrameDirection]]
     ) -> list[tuple[Frame, FrameDirection]]:
-        needs_inference = False
+        # Silently append deferred events to context without triggering inference.
+        # The tool result already gets its own inference via function calling.
+        # Task completions bypass deferral entirely (delivered via super().queue_frame).
         for f, d in frames:
             if isinstance(f, LLMMessagesAppendFrame) and f.run_llm:
                 f.run_llm = False
-                needs_inference = True
-
-        if needs_inference:
-            frames.append((LLMRunFrame(), FrameDirection.DOWNSTREAM))
-
         return frames
 
     # ── Request ID tracking ────────────────────────────────────────────
@@ -244,6 +323,11 @@ class VoiceAgent(LLMAgent):
         req_id = result.get("request_id") if isinstance(result, dict) else None
         if req_id:
             self.track_request_id(req_id)
+
+    async def _queue_task_completion_event(self, event_xml: str) -> None:
+        await super().queue_frame(
+            LLMMessagesAppendFrame(messages=[{"role": "user", "content": event_xml}], run_llm=True)
+        )
 
     # ── Event-generating tools ─────────────────────────────────────────
     # Return ack with run_llm=False. Real data arrives via game event.
@@ -383,6 +467,7 @@ class VoiceAgent(LLMAgent):
                 "my_corporation", {"character_id": self._character_id}
             )
         summary = summarize_corporation_info(result)
+        self._begin_assistant_response_cycle()
         await params.result_callback({"summary": summary})
 
     async def _handle_leaderboard_resources(self, params: FunctionCallParams):
@@ -394,6 +479,7 @@ class VoiceAgent(LLMAgent):
             force_refresh=args.get("force_refresh", False),
         )
         summary = summarize_leaderboard(result)
+        self._begin_assistant_response_cycle()
         if summary:
             await params.result_callback({"summary": summary})
         else:
@@ -405,6 +491,7 @@ class VoiceAgent(LLMAgent):
         result = await self._game_client.get_ship_definitions()
         definitions = result.get("definitions", result)
         summary = summarize_ship_definitions(definitions)
+        self._begin_assistant_response_cycle()
         await params.result_callback({"summary": summary})
 
     async def _handle_load_game_info(self, params: FunctionCallParams):
@@ -412,6 +499,7 @@ class VoiceAgent(LLMAgent):
 
         topic = str(params.arguments.get("topic", "")).strip()
         if topic not in AVAILABLE_TOPICS:
+            self._begin_assistant_response_cycle()
             await params.result_callback(
                 {
                     "success": False,
@@ -421,8 +509,10 @@ class VoiceAgent(LLMAgent):
             return
         try:
             content = load_fragment(topic)
+            self._begin_assistant_response_cycle()
             await params.result_callback({"success": True, "topic": topic, "content": content})
         except FileNotFoundError as exc:
+            self._begin_assistant_response_cycle()
             await params.result_callback({"success": False, "error": str(exc)})
 
     # ══════════════════════════════════════════════════════════════════════
@@ -679,9 +769,25 @@ class VoiceAgent(LLMAgent):
             f'task_type="{task_type}">\n{llm_msg}\n</event>'
         )
 
-        await self.queue_frame(
-            LLMMessagesAppendFrame(messages=[{"role": "user", "content": event_xml}], run_llm=True)
-        )
+        # Wait for the full response cycle (tool call → LLM response → bot speech)
+        # before delivering task completion. Uses super().queue_frame() to bypass
+        # LLMAgent's defer_tool_frames mechanism which would coalesce the task
+        # completion into the tool result's inference.
+        while self.tool_call_active:
+            await asyncio.sleep(0.05)
+        if self._assistant_cycle_active:
+            logger.debug("VoiceAgent: waiting for assistant response cycle to go idle")
+        await self._assistant_cycle_idle_event.wait()
+        elapsed = time.monotonic() - self._bot_stopped_speaking_at
+        remaining = TASK_RESPONSE_COOLDOWN_SECONDS - elapsed
+        if remaining > 0:
+            logger.debug(
+                "VoiceAgent: cooling down {:.2f}s before task response inference",
+                remaining,
+            )
+            await asyncio.sleep(remaining)
+
+        await self._queue_task_completion_event(event_xml)
 
         # End the task agent
         try:
@@ -929,6 +1035,7 @@ class VoiceAgent(LLMAgent):
 
     async def _handle_start_task_tool(self, params: FunctionCallParams):
         result = await self._handle_start_task(params)
+        self._begin_assistant_response_cycle()
         await params.result_callback({"result": result})
 
     async def _handle_stop_task_tool(self, params: FunctionCallParams):
@@ -944,6 +1051,7 @@ class VoiceAgent(LLMAgent):
     async def _handle_steer_task_tool(self, params: FunctionCallParams):
         result = await self._handle_steer_task(params)
         if isinstance(result, dict) and result.get("success") is False:
+            self._begin_assistant_response_cycle()
             await params.result_callback(
                 {"error": result.get("error", "Request failed.")},
                 properties=FunctionCallResultProperties(run_llm=True),
@@ -953,6 +1061,7 @@ class VoiceAgent(LLMAgent):
             payload = {"summary": summary or "steer_task completed."}
             if isinstance(result, dict) and result.get("task_id"):
                 payload["task_id"] = result["task_id"]
+            self._begin_assistant_response_cycle()
             await params.result_callback(
                 payload, properties=FunctionCallResultProperties(run_llm=True)
             )
@@ -960,6 +1069,7 @@ class VoiceAgent(LLMAgent):
     async def _handle_query_task_progress_tool(self, params: FunctionCallParams):
         result = await self._handle_query_task_progress(params)
         if isinstance(result, dict) and result.get("success") is False:
+            self._begin_assistant_response_cycle()
             await params.result_callback(
                 {"error": result.get("error", "Request failed.")},
                 properties=FunctionCallResultProperties(run_llm=True),
@@ -969,6 +1079,7 @@ class VoiceAgent(LLMAgent):
             payload = {"summary": summary or "query_task_progress completed."}
             if isinstance(result, dict) and result.get("task_id"):
                 payload["task_id"] = result["task_id"]
+            self._begin_assistant_response_cycle()
             await params.result_callback(
                 payload, properties=FunctionCallResultProperties(run_llm=True)
             )

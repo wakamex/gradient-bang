@@ -13,7 +13,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from pipecat.frames.frames import LLMRunFrame
+from pipecat.frames.frames import LLMMessagesAppendFrame, LLMRunFrame
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import FunctionCallParams
 
 from gradientbang.pipecat_server.subagents.task_agent import TaskAgent
@@ -77,6 +78,11 @@ class TestTaskLifecycleE2E:
             assert len(completion_msgs) >= 1, (
                 f"Expected task.completed in LLM context. Got: "
                 f"{[c[:80] for c, _ in h.llm_messages]}"
+            )
+            task_finish_msgs = [c for c, _ in h.llm_messages if "task.finish" in c]
+            assert task_finish_msgs == [], (
+                f"task.finish should not be appended to the voice LLM. "
+                f"Got: {[c[:80] for c in task_finish_msgs]}"
             )
         finally:
             await h.stop()
@@ -228,7 +234,7 @@ class TestAsyncCompletionE2E:
 
         Before the fix, task completion caused duplicate inference because both:
         1. The bus protocol (on_task_response) injects task.completed with run_llm=True
-        2. The task.finish game event via EventRelay also triggers run_llm=True
+        2. The task.finish game event via EventRelay also reached the voice LLM
 
         This caused the LLM to repeat itself (users reported 3x responses:
         start_task result + two duplicate completion inferences).
@@ -272,6 +278,12 @@ class TestAsyncCompletionE2E:
             assert "task.completed" in completion_inferences[0][0], (
                 f"Completion inference should be from bus protocol (task.completed), "
                 f"got: {completion_inferences[0][0][:100]}"
+            )
+
+            task_finish_msgs = [c for c, _ in h.llm_messages if "task.finish" in c]
+            assert task_finish_msgs == [], (
+                f"task.finish should not be appended to the voice LLM. "
+                f"Got: {[c[:100] for c in task_finish_msgs]}"
             )
         finally:
             await h.stop()
@@ -594,77 +606,94 @@ class TestInferenceCoalescingE2E:
         self.api = edge_api
         self.make_game_client = make_game_client
 
-    async def test_n_simultaneous_completions_single_run_frame(self):
-        """N inject_context(run_llm=True) with LLM idle → exactly 1 LLMRunFrame.
+    async def test_n_simultaneous_completions_are_silent_when_deferred(self):
+        """Deferred completion frames are appended without emitting an LLMRunFrame.
 
-        Simulates N corp-ship tasks completing simultaneously with no inference
-        currently in progress. Each fires inject_context(run_llm=True); only one
-        LLMRunFrame should reach the pipeline.
+        The recent VoiceAgent changes intentionally strip run_llm from deferred
+        event frames. The tool result gets its own inference; deferred task
+        completions should not inject an extra one here.
         """
         h = E2EHarness(self.character_id, self.api, self.make_game_client)
         await h.start()
         try:
             await h.join_game()
-            h.llm_run_frames.clear()
 
-            await asyncio.gather(
-                h.voice_agent.inject_context(
-                    [{"role": "user", "content": "task.completed 1"}], run_llm=True
-                ),
-                h.voice_agent.inject_context(
-                    [{"role": "user", "content": "task.completed 2"}], run_llm=True
-                ),
-                h.voice_agent.inject_context(
-                    [{"role": "user", "content": "task.completed 3"}], run_llm=True
-                ),
+            # Simulate 3 deferred frames with run_llm=True (concurrent task completions)
+            frames = [
+                (LLMMessagesAppendFrame(messages=[{"role": "user", "content": "task.completed 1"}], run_llm=True), FrameDirection.DOWNSTREAM),
+                (LLMMessagesAppendFrame(messages=[{"role": "user", "content": "task.completed 2"}], run_llm=True), FrameDirection.DOWNSTREAM),
+                (LLMMessagesAppendFrame(messages=[{"role": "user", "content": "task.completed 3"}], run_llm=True), FrameDirection.DOWNSTREAM),
+            ]
+
+            result = await h.voice_agent.process_deferred_tool_frames(frames)
+
+            run_frames = [f for f, _ in result if isinstance(f, LLMRunFrame)]
+            remaining_run_llm = [f for f, _ in result if isinstance(f, LLMMessagesAppendFrame) and f.run_llm]
+
+            assert len(run_frames) == 0, (
+                f"Expected 0 LLMRunFrames for 3 deferred completions, "
+                f"got {len(run_frames)}"
             )
-            await asyncio.sleep(0.05)  # allow _emit_coalesced_run to fire
-
-            assert len(h.llm_run_frames) == 1, (
-                f"Expected exactly 1 LLMRunFrame for 3 simultaneous completions, "
-                f"got {len(h.llm_run_frames)}"
+            assert len(remaining_run_llm) == 0, (
+                f"All LLMMessagesAppendFrame.run_llm should be False after coalescing"
             )
         finally:
             await h.stop()
 
-    async def test_task_completion_while_llm_speaking_deferred(self):
-        """Task completion arriving while VoiceAgent LLM is inflight defers until speech ends.
+    async def test_task_completion_waits_for_spoken_turn_and_cooldown(self, monkeypatch):
+        """Task completion waits for the prior spoken turn to finish before injection."""
+        import gradientbang.pipecat_server.subagents.voice_agent as voice_agent_module
+        from gradientbang.subagents.agents import TaskStatus
+        from gradientbang.subagents.bus.messages import BusTaskResponseMessage
 
-        REGRESSION: when a garrison deployment completes while the LLM is already
-        responding to a status question, the garrison outcome was previously queued
-        as an immediate second LLMRunFrame, causing back-to-back responses.
-        """
         h = E2EHarness(self.character_id, self.api, self.make_game_client)
         await h.start()
         try:
             await h.join_game()
-            h.llm_run_frames.clear()
-
-            # Simulate LLM mid-response (e.g. answering a status question)
-            h.voice_agent._llm_response_inflight = True
-
-            await h.voice_agent.inject_context(
-                [{"role": "user", "content": "<event name=\"task.completed\">garrison deployed</event>"}],
-                run_llm=True,
+            monkeypatch.setattr(voice_agent_module, "TASK_RESPONSE_COOLDOWN_SECONDS", 0.05)
+            monkeypatch.setattr(
+                voice_agent_module,
+                "TASK_RESPONSE_SPEECH_START_GRACE_SECONDS",
+                1.0,
             )
-            await asyncio.sleep(0.05)
 
-            # Should not have fired yet — deferred until LLM finishes
-            assert len(h.llm_run_frames) == 0, (
-                f"LLMRunFrame should be deferred while LLM is inflight, "
-                f"got {len(h.llm_run_frames)}"
+            h.voice_agent._task_output_handler = AsyncMock()
+            h.voice_agent.send_message = AsyncMock()
+            h.voice_agent._update_polling_scope = MagicMock()
+            h.voice_agent._queue_task_completion_event = AsyncMock()
+
+            child = MagicMock()
+            child.name = "task_abc123"
+            child._is_corp_ship = False
+            child._game_client = h.voice_agent._game_client
+            h.voice_agent._children = [child]
+
+            h.voice_agent._handle_llm_response_started()
+            h.voice_agent._handle_llm_response_ended()
+
+            response_task = asyncio.create_task(
+                h.voice_agent.on_task_response(
+                    BusTaskResponseMessage(
+                        source=child.name,
+                        task_id="tid-1",
+                        status=TaskStatus.COMPLETED,
+                        response={"message": "Task done"},
+                    )
+                )
             )
-            assert h.voice_agent._deferred_after_response is True
+            await asyncio.sleep(0.01)
+            h.voice_agent._queue_task_completion_event.assert_not_awaited()
 
-            # Simulate LLMFullResponseEndFrame arriving (triggers the on_ready handler)
-            h.voice_agent._llm_response_inflight = False
-            h.voice_agent._deferred_after_response = False
-            await h.voice_agent.queue_frame(LLMRunFrame())
+            h.voice_agent._handle_bot_started_speaking()
+            await asyncio.sleep(0.01)
+            h.voice_agent._queue_task_completion_event.assert_not_awaited()
 
-            assert len(h.llm_run_frames) == 1, (
-                f"Expected exactly 1 LLMRunFrame after LLM finishes speaking, "
-                f"got {len(h.llm_run_frames)}"
-            )
+            h.voice_agent._handle_bot_stopped_speaking()
+            await asyncio.sleep(0.02)
+            h.voice_agent._queue_task_completion_event.assert_not_awaited()
+
+            await asyncio.wait_for(response_task, timeout=1.0)
+            h.voice_agent._queue_task_completion_event.assert_awaited_once()
         finally:
             await h.stop()
 
