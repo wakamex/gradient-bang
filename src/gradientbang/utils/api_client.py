@@ -1436,9 +1436,14 @@ class AsyncGameClient:
 
         return await self._request("ship.sell", payload)
 
-    async def get_ship_definitions(self) -> Dict[str, Any]:
+    async def get_ship_definitions(
+        self, *, include_description: bool = False
+    ) -> Dict[str, Any]:
         """Return all ship definitions from the database."""
-        return await self._request("ship.definitions", {})
+        payload: Dict[str, Any] = {}
+        if include_description:
+            payload["include_description"] = True
+        return await self._request("ship.definitions", payload)
 
     async def rename_ship(
         self,

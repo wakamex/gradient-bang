@@ -9,6 +9,7 @@ real TaskAgent pipeline with a scripted LLM, and real event relay routing.
 
 import asyncio
 import uuid
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -258,6 +259,100 @@ class TestAsyncCompletionE2E:
                 f"Bus events: {[e.get('event_name') for e in h.bus_events]}"
             )
         finally:
+            await h.stop()
+
+    async def test_event_query_completion_via_request_id_on_shared_client(self):
+        """Player-task event_query should complete via request_id correlation on shared client."""
+        h = E2EHarness(self.character_id, self.api, self.make_game_client)
+        await h.start()
+        try:
+            await h.join_game()
+
+            end_time = datetime.now(timezone.utc)
+            start_time = end_time - timedelta(hours=24)
+            h.set_task_script(
+                [
+                    (
+                        "event_query",
+                        {
+                            "start": start_time.isoformat(),
+                            "end": end_time.isoformat(),
+                            "max_rows": 10,
+                        },
+                    )
+                ]
+            )
+            result = await h.start_player_task("Summarize my recent activity")
+            assert result["success"] is True, f"start_task failed: {result}"
+
+            completed = await h.wait_for_task_complete(timeout=30.0)
+            assert completed, "Player task did not complete after event_query"
+
+            event_query_bus = [
+                event for event in h.bus_events if event.get("event_name") == "event.query"
+            ]
+            assert event_query_bus, (
+                f"Expected event.query on the bus. "
+                f"Bus events: {[e.get('event_name') for e in h.bus_events]}"
+            )
+            assert any(event.get("request_id") for event in event_query_bus), (
+                f"Expected event.query bus event to carry request_id. Got: {event_query_bus}"
+            )
+        finally:
+            await h.stop()
+
+    async def test_pipeline_error_surfaces_as_normal_failed_task(self):
+        """LLM pipeline errors should fail the task through the standard response path."""
+        h = E2EHarness(self.character_id, self.api, self.make_game_client)
+        await h.start()
+        try:
+            await h.join_game()
+
+            h._task_llm_gate = asyncio.Event()
+            h.set_task_script([("event_query", {})])
+            result = await h.start_player_task("Summarize my recent activity")
+            assert result["success"] is True, f"start_task failed: {result}"
+
+            task_agent = None
+            for _ in range(40):
+                task_agent = next(
+                    (c for c in h.voice_agent.children if isinstance(c, TaskAgent)),
+                    None,
+                )
+                if task_agent and task_agent._active_task_id:
+                    break
+                await asyncio.sleep(0.05)
+
+            assert task_agent is not None, "TaskAgent should have been created"
+            assert task_agent._active_task_id, "TaskAgent should have an active task ID"
+
+            await task_agent.on_error(
+                "Error during completion: Error code: 400 - "
+                "{'error': {'message': 'Input tokens exceed the configured limit', "
+                "'code': 'context_length_exceeded'}}",
+                fatal=False,
+            )
+
+            completed = await h.wait_for_task_complete(timeout=5.0)
+            assert completed, "Task should fail cleanly instead of hanging"
+            assert not h.voice_agent._task_groups, "Failed task group should be removed"
+
+            failed_task_outputs = [
+                event
+                for event in h.rtvi_events_of_type("task_output")
+                if event.get("payload", {}).get("task_message_type") == "failed"
+            ]
+            assert failed_task_outputs, (
+                f"Expected failed task_output after pipeline error. "
+                f"Got: {h.rtvi_events_of_type('task_output')}"
+            )
+            assert any("task.failed" in content for content, _ in h.llm_messages), (
+                f"Expected task.failed in voice LLM messages. "
+                f"Got: {[content[:120] for content, _ in h.llm_messages]}"
+            )
+        finally:
+            if h._task_llm_gate:
+                h._task_llm_gate.set()
             await h.stop()
 
     async def test_task_completion_triggers_single_inference(self):

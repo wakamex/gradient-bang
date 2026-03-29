@@ -263,7 +263,7 @@ class ClientMessageHandler:
 
     async def _handle_get_ship_definitions(self, msg_type, msg_data):
         try:
-            await self._game_client.get_ship_definitions()
+            await self._game_client.get_ship_definitions(include_description=True)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to fetch ship definitions")
             await self._rtvi.push_frame(
