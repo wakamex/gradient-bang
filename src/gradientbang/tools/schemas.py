@@ -350,7 +350,7 @@ BANK_DEPOSIT = FunctionSchema(
 
 BANK_WITHDRAW = FunctionSchema(
     name="bank_withdraw",
-    description="Withdraw credits from your own mega-port bank account in Federation Space back onto your ship.",
+    description="Withdraw credits from your own mega-port bank account in Federation Space back onto your ship. Only available for personal ships — corporation ships cannot withdraw.",
     properties={
         "amount": {
             "type": "integer",

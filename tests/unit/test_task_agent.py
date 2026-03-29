@@ -386,6 +386,25 @@ class TestTaskIdTagging:
         assert "Current session started at 2026-03-29T18:46:44+00:00." in messages[1]["content"]
         assert "Summarize the last session" in messages[1]["content"]
 
+    async def test_corp_task_request_includes_corporation_bootstrap_instruction(self):
+        agent = _make_task_agent(is_corp_ship=True, tag_outbound_rpcs_with_task_id=True)
+        agent._llm_context = MagicMock()
+        agent.queue_frame = AsyncMock()
+        agent._game_client.task_lifecycle = AsyncMock()
+
+        await agent.on_task_request(
+            BusTaskRequestMessage(
+                source="voice",
+                task_id="task-1",
+                payload={"task_description": "Check corporation ship status"},
+            )
+        )
+
+        messages = agent._llm_context.set_messages.call_args.args[0]
+        assert "This task is running on a corporation ship." in messages[1]["content"]
+        assert "first call `my_status()`" in messages[1]["content"]
+        assert "call `corporation_info()`" in messages[1]["content"]
+
     async def test_player_task_completion_does_not_clear_unrelated_shared_client_task_id(self):
         agent = _make_task_agent(tag_outbound_rpcs_with_task_id=False)
         agent._active_task_id = "task-1"

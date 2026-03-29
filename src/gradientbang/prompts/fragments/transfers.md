@@ -113,13 +113,14 @@ bank_deposit(
 bank_withdraw(amount=3000)
 ```
 
-Pulls savings back onto your ship.
+Pulls savings back onto your ship. Corporation ships cannot withdraw from bank accounts — only personal ships can.
 
 ### Bank Safety
 
 - Bank credits are safe from tolls and combat
 - Must physically be at a mega-port to use the bank
 - Grab a fresh status.snapshot before depositing to confirm balances
+- Total purchasing power = on-hand credits + bank balance (withdrawal required first)
 
 ## Requirements
 
