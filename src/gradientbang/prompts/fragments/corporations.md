@@ -119,6 +119,8 @@ bank_deposit(
 The ship must be at a mega-port in Federation Space.
 `target_player_name` must be a real member character name, not `Corp Ship [xxxxxx]`.
 
+Corporation ships **cannot** withdraw from bank accounts. Only personal ships may use `bank_withdraw`.
+
 ## Credit Transfers
 
 Transfer credits between ships in the same sector:

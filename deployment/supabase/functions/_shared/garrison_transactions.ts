@@ -160,6 +160,10 @@ export async function runLeaveFightersTransaction(
     }
 
     const existingGarrison = garrisonRows[0] ?? null;
+    // Track effective owner: defaults to deployer, but switches to existing
+    // garrison owner when a corp mate reinforces a friendly garrison.
+    let effectiveOwnerId = input.characterId;
+
     if (existingGarrison && existingGarrison.owner_id !== input.characterId) {
       // Check if the existing garrison belongs to a corp mate (including corp-owned ships).
       // Use COALESCE to check corporation_members first, then ship_instances for corp ships.
@@ -181,12 +185,16 @@ export async function runLeaveFightersTransaction(
       const ownerCorpId = ownerCorpResult.rows[0]?.corp_id ?? null;
       const isFriendly = deployerCorpId !== null && ownerCorpId !== null && deployerCorpId === ownerCorpId;
 
-      throw buildStatusError(
-        isFriendly
-          ? "Sector already has a friendly garrison; collect or reinforce through the existing garrison owner."
-          : "Sector already contains another player's garrison; clear it before deploying your fighters.",
-        409,
-      );
+      if (!isFriendly) {
+        throw buildStatusError(
+          "Sector already contains another player's garrison; clear it before deploying your fighters.",
+          409,
+        );
+      }
+
+      // Corp mate reinforcement: add fighters to the existing garrison
+      // but preserve the original owner.
+      effectiveOwnerId = existingGarrison.owner_id;
     }
 
     const shipResult = await pg.queryObject<LockedShipLeaveRow>(
@@ -231,31 +239,50 @@ export async function runLeaveFightersTransaction(
     }
 
     const effectiveTollAmount = input.mode === "toll" ? input.tollAmount : 0;
+    const isCorpReinforcement = effectiveOwnerId !== input.characterId;
     let garrisonResult;
     if (existingGarrison) {
-      garrisonResult = await pg.queryObject<LockedGarrisonRow>(
-        `UPDATE garrisons
-        SET fighters = fighters + $1,
-            mode = $2,
-            toll_amount = $3,
-            updated_at = NOW()
-        WHERE sector_id = $4
-          AND owner_id = $5
-        RETURNING
-          owner_id,
-          fighters::int AS fighters,
-          mode,
-          COALESCE(toll_amount, 0)::float8 AS toll_amount,
-          COALESCE(toll_balance, 0)::float8 AS toll_balance,
-          deployed_at`,
-        [
-          input.quantity,
-          input.mode,
-          effectiveTollAmount,
-          input.sectorId,
-          input.characterId,
-        ],
-      );
+      // Corp mate reinforcement: only add fighters, preserve existing mode/toll.
+      // Owner reinforcement: add fighters and update mode/toll.
+      garrisonResult = isCorpReinforcement
+        ? await pg.queryObject<LockedGarrisonRow>(
+            `UPDATE garrisons
+            SET fighters = fighters + $1,
+                updated_at = NOW()
+            WHERE sector_id = $2
+              AND owner_id = $3
+            RETURNING
+              owner_id,
+              fighters::int AS fighters,
+              mode,
+              COALESCE(toll_amount, 0)::float8 AS toll_amount,
+              COALESCE(toll_balance, 0)::float8 AS toll_balance,
+              deployed_at`,
+            [input.quantity, input.sectorId, effectiveOwnerId],
+          )
+        : await pg.queryObject<LockedGarrisonRow>(
+            `UPDATE garrisons
+            SET fighters = fighters + $1,
+                mode = $2,
+                toll_amount = $3,
+                updated_at = NOW()
+            WHERE sector_id = $4
+              AND owner_id = $5
+            RETURNING
+              owner_id,
+              fighters::int AS fighters,
+              mode,
+              COALESCE(toll_amount, 0)::float8 AS toll_amount,
+              COALESCE(toll_balance, 0)::float8 AS toll_balance,
+              deployed_at`,
+            [
+              input.quantity,
+              input.mode,
+              effectiveTollAmount,
+              input.sectorId,
+              effectiveOwnerId,
+            ],
+          );
     } else {
       garrisonResult = await pg.queryObject<LockedGarrisonRow>(
         `INSERT INTO garrisons (
@@ -277,7 +304,7 @@ export async function runLeaveFightersTransaction(
           deployed_at`,
         [
           input.sectorId,
-          input.characterId,
+          effectiveOwnerId,
           input.quantity,
           input.mode,
           effectiveTollAmount,

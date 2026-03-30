@@ -84,10 +84,11 @@ export async function resetDatabase(
       `TRUNCATE ${tableList} RESTART IDENTITY CASCADE`,
     );
 
-    // Re-insert leaderboard_cache singleton (expected by leaderboard functions)
+    // Re-insert leaderboard_cache singleton with an old timestamp so it's
+    // treated as stale by leaderboard_resources (5-min TTL).
     await pg.queryObject(`
-      INSERT INTO leaderboard_cache (id, wealth, territory, trading, exploration)
-      VALUES (1, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)
+      INSERT INTO leaderboard_cache (id, wealth, territory, trading, exploration, updated_at)
+      VALUES (1, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '2000-01-01T00:00:00Z')
       ON CONFLICT (id) DO NOTHING
     `);
   } finally {

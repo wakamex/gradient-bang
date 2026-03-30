@@ -30,6 +30,7 @@ import {
 } from "../_shared/actors.ts";
 import { buildSectorSnapshot } from "../_shared/map.ts";
 import { loadUniverseMeta, isFedspaceSector } from "../_shared/fedspace.ts";
+import { getEffectiveCorporationId } from "../_shared/corporations.ts";
 import { traced } from "../_shared/weave.ts";
 
 Deno.serve(traced("combat_set_garrison_mode", async (req, trace) => {
@@ -185,12 +186,11 @@ async function handleCombatSetGarrisonMode(params: {
     throw err;
   }
 
-  // Find garrison owned by character in this sector
-  const { data: existingGarrisons, error: garrisonFetchError } = await supabase
+  // Find garrison in this sector (any owner — we check corp membership below).
+  const { data: existingGarrison, error: garrisonFetchError } = await supabase
     .from("garrisons")
     .select("owner_id, fighters, mode, toll_amount, toll_balance, deployed_at")
     .eq("sector_id", sector)
-    .eq("owner_id", characterId)
     .maybeSingle();
 
   if (garrisonFetchError) {
@@ -205,18 +205,40 @@ async function handleCombatSetGarrisonMode(params: {
     throw err;
   }
 
-  if (!existingGarrisons) {
+  if (!existingGarrison) {
     const err = new Error(
-      "No garrison found for character in this sector",
+      "No garrison found in this sector",
     ) as Error & { status?: number };
     err.status = 404;
     throw err;
   }
 
+  // Verify the requester owns this garrison or is a corp mate of the owner.
+  const garrisonOwnerId = existingGarrison.owner_id;
+  if (garrisonOwnerId !== characterId) {
+    const requesterCorpId = await getEffectiveCorporationId(
+      supabase, characterId, ship.ship_id,
+    );
+    // For corp ships, character_id = ship_id, so pass owner_id as both.
+    const ownerCorpId = await getEffectiveCorporationId(
+      supabase, garrisonOwnerId, garrisonOwnerId,
+    );
+    const isFriendly = requesterCorpId !== null && ownerCorpId !== null
+      && requesterCorpId === ownerCorpId;
+
+    if (!isFriendly) {
+      const err = new Error(
+        "No friendly garrison found in this sector",
+      ) as Error & { status?: number };
+      err.status = 404;
+      throw err;
+    }
+  }
+
   // Normalize toll amount (only applies to toll mode)
   const effectiveTollAmount = mode === "toll" ? tollAmount : 0;
 
-  // Update garrison mode
+  // Update garrison mode using the actual garrison owner_id.
   const { data: updatedGarrison, error: garrisonUpdateError } = await supabase
     .from("garrisons")
     .update({
@@ -225,7 +247,7 @@ async function handleCombatSetGarrisonMode(params: {
       updated_at: new Date().toISOString(),
     })
     .eq("sector_id", sector)
-    .eq("owner_id", characterId)
+    .eq("owner_id", garrisonOwnerId)
     .select()
     .single();
 
@@ -241,15 +263,22 @@ async function handleCombatSetGarrisonMode(params: {
     throw err;
   }
 
+  // Resolve garrison owner's name for the event payload.
+  let garrisonOwnerName = character.name;
+  if (garrisonOwnerId !== characterId) {
+    const ownerChar = await loadCharacter(supabase, garrisonOwnerId);
+    garrisonOwnerName = ownerChar.name;
+  }
+
   // Build garrison payload for event
   const garrisonPayload = {
-    owner_name: character.name, // Human-readable name, not UUID
+    owner_name: garrisonOwnerName,
     fighters: updatedGarrison.fighters,
     fighter_loss: null,
     mode: updatedGarrison.mode,
     toll_amount: updatedGarrison.toll_amount,
     deployed_at: updatedGarrison.deployed_at,
-    is_friendly: true, // Garrison is always friendly to its owner
+    is_friendly: true,
   };
 
   // Emit garrison.mode_changed event to character

@@ -23,9 +23,9 @@ Always prefer specific filters over broad queries to minimize context usage.
 | Find an anchor by keyword | filter_event_type + filter_string_match | bare filter_string_match across all event types |
 
 Important:
-- Never use a bare `filter_string_match` query across all event types for anchor discovery.
-- Broad string matching can hit old `event.query` payloads, which causes recursive history-query results instead of real anchor events.
-- When searching for a named ship, purchase, or other anchor term, always pair the keyword with a likely `filter_event_type`.
+- ALWAYS set `filter_event_type`, `filter_task_id`, or `filter_sector`. Never run a query without at least one of these filters — unfiltered queries return too much data and will fail.
+- Never use a bare `filter_string_match` query without `filter_event_type`.
+- When searching for a named ship, purchase, or other keyword, use `filter_event_type="task.finish"` + `filter_string_match`.
 
 ## Two-Step Pattern for Task Analysis
 
@@ -97,58 +97,65 @@ event_query(
 
 ## Session-Relative Questions
 
-For questions like:
+`session.started` events mark when the player joined the game. Use them to bound sessions.
 
-- "What did I do in the last session?"
-- "What happened in the session before the Aegis cruiser purchase?"
-- "Tell me about the session after I joined the corporation"
+### "What did I do last session?"
 
-use an anchor-first strategy.
+If your context includes "Current session started at {T}", use T as the current session boundary. Query `session.started` events BEFORE T to find the previous session:
 
-### Session-before/session-after playbook
-
-For short-term historical questions, interpret "session" as the nearest bounded cluster of `task.start` and `task.finish` activity inside a recent time window. Use join-originated `status.snapshot` markers only as supporting evidence, not as the first search.
-
-1. For "last session" or "session before last", start with a small recent reverse query over task history:
 ```
 event_query(
-    start=..., end=...,
-    filter_event_type="task.finish",
+    start=<7 days ago>, end=<T>,
+    filter_event_type="session.started",
     sort_direction="reverse",
-    max_rows=10
+    max_rows=1
 )
 ```
-   - Keep the time range bounded and recent, usually the last few days.
-   - If needed, run a matching `task.start` query in the same bounded window.
-   - Infer the target session from the nearest cluster of task activity rather than from a broad date scan.
-   - Do NOT start with mixed event-type scans across a large range.
+"Last session" = the returned timestamp → T. If no results, use T minus 24 hours → T.
 
-2. For session-relative questions around an anchor, find the anchor event or anchor task first with a narrow filtered query.
-   - Prefer `filter_event_type` plus `filter_string_match` or `max_rows=1`
-   - Examples:
-   - `task.finish` with a purchase-related keyword
-   - `corporation.ship_purchased`
-   - `trade.executed`
-   - `bank.transaction`
-   - Try likely anchor event types one at a time rather than doing one broad keyword search across all event types
-   - For ship-purchase questions, prefer `corporation.ship_purchased` first, then `task.finish`
-   - Do not use bare `filter_string_match="Aegis Cruiser"`-style queries without `filter_event_type`
+Then get activity in that window:
+```
+event_query(
+    start=<previous session.started>, end=<T>,
+    filter_event_type="task.finish",
+    sort_direction="forward"
+)
+```
+Task summaries are usually sufficient. Only query `trade.executed`, `bank.transaction`, etc. if task summaries lack detail.
 
-3. Once you know the anchor timestamp, identify the neighboring task history around that time.
-   - Use nearby `task.start` and `task.finish` results to identify the session immediately before or after the anchor.
-   - Prefer the smallest bounded window that still contains the neighboring task cluster.
-   - If join-originated `status.snapshot` markers already appear in your results, you may use them as extra evidence for where the session likely began.
+### "What happened in the session where I bought the Aegis?"
 
-4. Summarize from that bounded session window first.
-   - Prefer `task.start` and `task.finish` first inside that exact window
-   - Task summaries are usually enough to answer what the player was doing
-   - Only query `trade.executed`, `bank.transaction`, `warp.purchase`, or other detailed event types inside that already-bounded window if task history is not enough
+Step 1 — Find the anchor. For ship purchases, use the dedicated event type:
+```
+event_query(
+    start=<7 days ago>, end=<now>,
+    filter_event_type="ship.traded_in",
+    filter_string_match="Aegis",
+    sort_direction="reverse",
+    max_rows=1
+)
+```
+For corp ship purchases use `corporation.ship_purchased` instead. If the dedicated event type returns 0, fall back to `task.finish` + `filter_string_match`.
 
-5. Do NOT start with broad multi-type scans across a large time range.
-   - Avoid querying several activity event types over a whole day or month before you have identified the target session window
-   - For "last session", do not broaden beyond a recent bounded task-history window unless the smaller query clearly did not capture enough activity
+Step 2 — Find the `session.started` before and after the anchor:
+```
+event_query(
+    start=<anchor - 7d>, end=<anchor timestamp>,
+    filter_event_type="session.started",
+    sort_direction="reverse",
+    max_rows=1
+)
+```
+```
+event_query(
+    start=<anchor timestamp>, end=<anchor + 7d>,
+    filter_event_type="session.started",
+    sort_direction="forward",
+    max_rows=1
+)
+```
 
-If task history is sparse or ambiguous, join-originated `status.snapshot` markers may help approximate session starts, but they are secondary evidence rather than the primary discovery path.
+Step 3 — Query `task.finish` between those two boundaries.
 
 ## Garrison Sector Activity Playbook
 
@@ -236,6 +243,9 @@ All filter parameters use the `filter_` prefix:
 | warp.purchase | warp power recharges |
 | task.start | task_description, task_id |
 | task.finish | task_summary, task_status |
+| session.started | session boundary marker (sector, ship_name, ship_type) |
+| ship.traded_in | personal ship purchase (old_ship_type, new_ship_type, price, trade_in_value) |
+| corporation.ship_purchased | corp ship purchase (ship_type, ship_name, purchase_price, buyer_name) |
 
 ## Calculating Trade Profit
 

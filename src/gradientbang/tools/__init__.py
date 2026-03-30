@@ -30,6 +30,7 @@ from gradientbang.tools.schemas import (
     BANK_WITHDRAW,
     PLACE_FIGHTERS,
     COLLECT_FIGHTERS,
+    SET_GARRISON_MODE,
     # Corporation
     CREATE_CORPORATION,
     JOIN_CORPORATION,
@@ -76,6 +77,7 @@ VOICE_TOOLS = ToolsSchema(
         # Direct actions
         RENAME_SHIP,
         RENAME_CORPORATION,
+        SET_GARRISON_MODE,
         CREATE_CORPORATION,
         LEAVE_CORPORATION,
         SEND_MESSAGE,
@@ -113,6 +115,7 @@ TASK_TOOLS = ToolsSchema(
         BANK_WITHDRAW,
         PLACE_FIGHTERS,
         COLLECT_FIGHTERS,
+        SET_GARRISON_MODE,
         # Corporation
         JOIN_CORPORATION,
         KICK_CORPORATION_MEMBER,

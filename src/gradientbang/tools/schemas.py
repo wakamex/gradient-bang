@@ -350,7 +350,7 @@ BANK_DEPOSIT = FunctionSchema(
 
 BANK_WITHDRAW = FunctionSchema(
     name="bank_withdraw",
-    description="Withdraw credits from your own mega-port bank account in Federation Space back onto your ship.",
+    description="Withdraw credits from your own mega-port bank account in Federation Space back onto your ship. Only available for personal ships — corporation ships cannot withdraw.",
     properties={
         "amount": {
             "type": "integer",
@@ -411,6 +411,30 @@ COLLECT_FIGHTERS = FunctionSchema(
         },
     },
     required=["sector", "quantity"],
+)
+
+SET_GARRISON_MODE = FunctionSchema(
+    name="set_garrison_mode",
+    description="Change the operating mode of a garrison in a sector. Only works on your own garrison or a corp mate's garrison.",
+    properties={
+        "sector": {
+            "type": "integer",
+            "description": "Sector ID containing the garrison",
+            "minimum": 0,
+        },
+        "mode": {
+            "type": "string",
+            "enum": ["offensive", "defensive", "toll"],
+            "description": "New behavior mode for the garrison",
+        },
+        "toll_amount": {
+            "type": "integer",
+            "description": "Credits required to pass when mode is toll",
+            "minimum": 0,
+            "default": 0,
+        },
+    },
+    required=["sector", "mode"],
 )
 
 # ── Corporation ───────────────────────────────────────────────────────
@@ -709,7 +733,7 @@ EVENT_QUERY = FunctionSchema(
         },
         "filter_event_type": {
             "type": "string",
-            "description": "Filter to a specific event type. e.g., 'task.start', 'task.finish', 'movement.complete' (for player's own movements), 'garrison.character_moved' (for monitoring events in a sector where we have placed fighters)",
+            "description": "Filter to a specific event type. e.g., 'session.started', 'task.start', 'task.finish', 'movement.complete' (for player's own movements), 'garrison.character_moved' (for monitoring events in a sector where we have placed fighters)",
         },
         "filter_string_match": {
             "type": "string",
@@ -906,7 +930,9 @@ START_TASK = FunctionSchema(
     name="start_task",
     description=(
         "Start a complex multi-step task for navigation, trading, or exploration. "
-        "Can control your own ship or a corporation ship."
+        "Can control your own ship or a corporation ship. "
+        "IMPORTANT: When a personal-ship task is running, wait for task.completed "
+        "before starting another personal-ship task."
     ),
     properties={
         "task_description": {
@@ -920,9 +946,11 @@ START_TASK = FunctionSchema(
         "ship_id": {
             "type": "string",
             "description": (
-                "Corporation ship ID to control. Accepts a full UUID or the short "
-                "prefix shown in brackets (e.g., [5a8369]). Omit this parameter "
-                "to control your own ship instead."
+                "Corporation ship ID to control. Only set this when the corp ship "
+                "is the ACTOR performing the work (e.g., exploring, trading). "
+                "OMIT ship_id when your personal ship is the actor — including "
+                "transfers/gifts TO a corp ship. Accepts full UUID or short prefix "
+                "(e.g., [5a8369])."
             ),
         },
     },
@@ -1033,4 +1061,5 @@ GAME_METHOD_ALIASES = {
     "bank_withdraw": "withdraw_from_bank",
     "place_fighters": "combat_leave_fighters",
     "collect_fighters": "combat_collect_fighters",
+    "set_garrison_mode": "combat_set_garrison_mode",
 }

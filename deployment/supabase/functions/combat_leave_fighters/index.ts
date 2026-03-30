@@ -280,15 +280,24 @@ async function handleCombatLeaveFighters(params: {
       tollAmount: effectiveTollAmount,
     });
 
+  // If a corp mate reinforced, the garrison owner differs from the deployer.
+  // Resolve the garrison owner's name for accurate event payloads.
+  const isCorpReinforcement = updatedGarrison.owner_id !== characterId;
+  let garrisonOwnerName = character.name;
+  if (isCorpReinforcement) {
+    const ownerChar = await pgLoadCharacter(pg, updatedGarrison.owner_id);
+    garrisonOwnerName = ownerChar.name;
+  }
+
   // Build garrison payload for events
   const garrisonPayload = {
-    owner_name: character.name, // Human-readable name, not UUID
+    owner_name: garrisonOwnerName,
     fighters: updatedGarrison.fighters,
     fighter_loss: null,
     mode: updatedGarrison.mode,
     toll_amount: updatedGarrison.toll_amount,
     deployed_at: updatedGarrison.deployed_at,
-    is_friendly: true, // Garrison is always friendly to its owner
+    is_friendly: true,
   };
 
   // Emit garrison.deployed event to character

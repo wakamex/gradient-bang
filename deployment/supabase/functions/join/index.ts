@@ -229,6 +229,24 @@ Deno.serve(traced("join", async (req, trace) => {
     });
     sStatusSnapshot.end();
 
+    // Emit session.started (self-scoped session boundary marker for historical queries)
+    const sSessionStarted = trace.span("emit_session_started");
+    await pgEmitCharacterEvent({
+      pg,
+      characterId,
+      eventType: "session.started",
+      payload: {
+        source,
+        sector: targetSector,
+        ship_name: ship.ship_name ?? shipDefinition.display_name,
+        ship_type: ship.ship_type,
+      },
+      sectorId: targetSector,
+      requestId,
+      corpId: character.corporation_id,
+    });
+    sSessionStarted.end();
+
     // Emit map.local SECOND
     const sMapLocal = trace.span("emit_map_local");
     mapPayload["source"] = source;

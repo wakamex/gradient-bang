@@ -103,6 +103,7 @@ ASYNC_TOOL_COMPLETIONS = {
     "salvage_collect": "salvage.collected",
     "place_fighters": "garrison.deployed",
     "collect_fighters": "garrison.collected",
+    "set_garrison_mode": "garrison.mode_changed",
     "event_query": "event.query",
     "purchase_fighters": "fighter.purchase",
     "purchase_ship": "status.update",
@@ -305,7 +306,9 @@ class TaskAgent(LLMAgent):
             {
                 "role": "user",
                 "content": create_task_instruction_user_message(
-                    self._task_description, context=task_context
+                    self._task_description,
+                    context=task_context,
+                    is_corp_ship=self._is_corp_ship,
                 ),
             },
         ]

@@ -172,12 +172,18 @@ def clear_cache() -> None:
     load_prompt.cache_clear()
 
 
-def create_task_instruction_user_message(task: str, context: Optional[str] = None) -> str:
+def create_task_instruction_user_message(
+    task: str,
+    context: Optional[str] = None,
+    *,
+    is_corp_ship: bool = False,
+) -> str:
     """Create a task-specific user message for the LLM.
 
     Args:
         task: The task to be completed.
         context: Optional additional context to include with the task.
+        is_corp_ship: Whether this task is executing on a corporation ship.
 
     Returns:
         Formatted prompt for the current decision point.
@@ -193,6 +199,18 @@ def create_task_instruction_user_message(task: str, context: Optional[str] = Non
         f"{datetime.now(timezone.utc).isoformat()}",
         "",
     ]
+
+    if is_corp_ship:
+        prompt_parts.extend(
+            [
+                "# Startup Bootstrap",
+                "",
+                "This task is running on a corporation ship.",
+                "Before taking other actions, first call `my_status()`.",
+                "After `my_status()` resolves, call `corporation_info()` to refresh corporation ship context before acting.",
+                "",
+            ]
+        )
 
     if context and context.strip():
         prompt_parts.extend(
