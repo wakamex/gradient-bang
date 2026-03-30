@@ -1130,11 +1130,11 @@ Deno.test({
 });
 
 // ============================================================================
-// Group 19: Friendly garrison — same corp deploys to occupied sector
+// Group 19: Friendly garrison — same corp reinforces occupied sector
 // ============================================================================
 
 Deno.test({
-  name: "combat — friendly garrison deploy rejected (same corp)",
+  name: "combat — friendly garrison reinforcement (same corp)",
   sanitizeOps: false,
   sanitizeResources: false,
   async fn(t) {
@@ -1174,15 +1174,18 @@ Deno.test({
       });
     });
 
-    await t.step("P2 (same corp) deploy rejected — friendly garrison", async () => {
-      const result = await api("combat_leave_fighters", {
+    await t.step("P2 (same corp) reinforces garrison", async () => {
+      const result = await apiOk("combat_leave_fighters", {
         character_id: p2Id,
         sector: 3,
         quantity: 50,
         mode: "offensive",
       });
-      assert(!result.ok || !result.body.success, "Expected friendly garrison deploy to fail");
-      assertEquals(result.status, 409, "Expected 409 conflict");
+      assertEquals(
+        (result as Record<string, unknown>).success,
+        true,
+        "Corp mate reinforcement should succeed",
+      );
     });
   },
 });

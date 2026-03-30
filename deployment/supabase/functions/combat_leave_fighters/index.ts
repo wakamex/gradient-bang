@@ -285,7 +285,7 @@ async function handleCombatLeaveFighters(params: {
   const isCorpReinforcement = updatedGarrison.owner_id !== characterId;
   let garrisonOwnerName = character.name;
   if (isCorpReinforcement) {
-    const ownerChar = await loadCharacter(supabase, updatedGarrison.owner_id);
+    const ownerChar = await pgLoadCharacter(pg, updatedGarrison.owner_id);
     garrisonOwnerName = ownerChar.name;
   }
 
