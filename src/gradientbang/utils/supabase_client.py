@@ -511,7 +511,7 @@ class AsyncGameClient(BaseAsyncGameClient):
                 raise ValueError("ship_name must be a non-empty string")
             payload["ship_name"] = ship_name
         if (ship_id or ship_name) and "actor_character_id" not in payload:
-            payload["actor_character_id"] = self._character_id
+            payload["actor_character_id"] = self._actor_character_id or self._character_id
         if character_id:
             payload["character_id"] = character_id
         return await self._request("bank_transfer", payload)

@@ -598,6 +598,29 @@ class EventRelay:
             return val.strip()
         return None
 
+    @staticmethod
+    def _is_friendly_garrison_move(event_name: str, payload: Any) -> bool:
+        """Suppress garrison.character_moved for friendly (own/corp) movements."""
+        if event_name != "garrison.character_moved":
+            return False
+        if not isinstance(payload, Mapping):
+            return False
+        player = payload.get("player")
+        garrison = payload.get("garrison")
+        if not isinstance(player, Mapping) or not isinstance(garrison, Mapping):
+            return False
+        # Moving player owns the garrison
+        if player.get("id") and player["id"] == garrison.get("owner_id"):
+            return True
+        # Moving player is in the garrison's corp
+        corp = player.get("corporation")
+        if isinstance(corp, Mapping):
+            player_corp_id = corp.get("corp_id")
+            garrison_corp_id = garrison.get("corporation_id")
+            if player_corp_id and garrison_corp_id and player_corp_id == garrison_corp_id:
+                return True
+        return False
+
     def _is_direct_recipient_event(self, ctx: Optional[Mapping[str, Any]]) -> bool:
         reason = self._resolve_recipient_reason(ctx, self._character_id)
         if reason in {"direct", "task_owner", "recipient"}:
@@ -832,6 +855,10 @@ class EventRelay:
         clean_payload = self._strip_internal_event_metadata(payload)
         event_context = self._extract_event_context(payload)
         cfg = EVENT_CONFIGS.get(event_name, _DEFAULT_CONFIG)
+
+        # Swallow friendly garrison movement alerts (own ship / corp ships)
+        if self._is_friendly_garrison_move(event_name, clean_payload):
+            return
 
         # Detect voice-agent origin before broadcasting to the bus.
         #

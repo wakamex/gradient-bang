@@ -14,7 +14,8 @@ The player sees a hex-grid map in their UI. When they ask about colors or icons,
 ## Regions
 
 - **Federation Space** — filled teal
-- **Neutral Space** — fill indigo
+- **Neutral Space** — filled indigo
+- **Border sector** — a Neutral sector (indigo) with a warp lane to a Federation Space sector (teal). Still Neutral, not Federation Space. Garrison placement is blocked here.
 
 ## Icons
 

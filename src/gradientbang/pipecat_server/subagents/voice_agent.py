@@ -283,6 +283,13 @@ class VoiceAgent(LLMAgent):
         )
         return True
 
+    def idle_report_cooldown_remaining(self) -> float:
+        """Seconds remaining before the next idle report is allowed."""
+        if self._last_idle_report_at == 0:
+            return 0.0
+        elapsed = time.time() - self._last_idle_report_at
+        return max(0.0, _IDLE_REPORT_COOLDOWN_SECS - elapsed)
+
     def reset_idle_report_cooldown(self) -> None:
         """Reset idle report cooldown so the next report can fire immediately."""
         self._last_idle_report_at = 0.0
@@ -1243,10 +1250,9 @@ class VoiceAgent(LLMAgent):
             return
 
         result = await self._handle_start_task(params)
-        self._begin_assistant_response_cycle()
         await params.result_callback(
             {"result": result},
-            properties=FunctionCallResultProperties(run_llm=True),
+            properties=FunctionCallResultProperties(run_llm=False),
         )
 
     async def _handle_stop_task_tool(self, params: FunctionCallParams):

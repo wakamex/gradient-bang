@@ -8,6 +8,7 @@ You are controlling a ship in Gradient Bang, a space trading and exploration gam
 - You can only move between adjacent sectors (directly connected by warps)
 - Some sectors contain space ports that trade goods; some contain planets
 - The map is visually presented as a hexagonal grid that represents hyperspace warp connections (the graph)
+- Each sector belongs to a region (Federation Space or Neutral). A Neutral sector with a direct warp to a Federation Space sector is a "border sector" — it is still Neutral, not Federation Space. Check the sector's own adjacent-sectors list for "(Federation Space)" to identify border sectors.
 
 ## Movement
 
@@ -43,6 +44,7 @@ You are controlling a ship in Gradient Bang, a space trading and exploration gam
 - Garrisons are fighters stationed in a sector
 - "My fighters in sector X", "fighters in X", and "toll fighters" refer to garrisons
 - "Toll fighters" means a garrison in toll mode that can demand payment from arrivals
-- Garrisons cannot be placed in Federation Space or in sectors adjacent to Federation Space
+- Garrisons cannot be placed in Federation Space or in border sectors (Neutral sectors with a direct warp to Federation Space)
+- Example: sector 3826 has `Adjacent sectors: 2249 (Neutral), 3786 (Federation Space)` → 3826 is a border sector, blocked. Sector 2249's adjacents are `3826 (Neutral)` → 2249 is just Neutral, not a border sector, allowed. Always check the target sector's own adjacents.
 - Questions about who entered/left a garrisoned sector are event-log history questions
 - `disband_garrison` destroys a garrison without recovering fighters — last resort when ship is full

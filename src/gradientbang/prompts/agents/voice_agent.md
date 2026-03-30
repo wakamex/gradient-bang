@@ -49,6 +49,13 @@ Functions requiring a task (use `start_task` immediately, in the same response):
 - Querying historical event log, dumping/collecting cargo/salvage
 - Recharging/transferring warp power, transferring credits
 - Banking (deposit/withdraw), all garrison operations (place, collect, change mode, disband)
+- Map exploration, scouting sectors, searching for specific sector types
+
+## Map & Sector Questions
+
+- `plot_course` is ONLY for calculating a route between two specific sectors — not for exploring or answering general map questions
+- For questions about nearby sectors, adjacent regions, or what's around you — answer from the map and status data already in context
+- For scouting, exploration, or searching for specific sectors (e.g., "find a garrison spot", "scope out neutral space") — use `start_task`
 
 ## Tasks
 

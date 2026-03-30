@@ -159,6 +159,104 @@ Deno.test({
 });
 
 // ============================================================================
+// Group 1b: Corp ship deposit happy path
+// ============================================================================
+
+Deno.test({
+  name: "bank_transfer — corp ship deposit happy path",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn(t) {
+    let corpId: string;
+    let corpShipId: string;
+
+    await t.step("reset and setup corp with corp ship", async () => {
+      await resetDatabase([P1, P2, P3]);
+      await apiOk("join", { character_id: p1Id });
+      await apiOk("join", { character_id: p2Id });
+
+      await setShipCredits(p1ShipId, 50000);
+      const createResult = await apiOk("corporation_create", {
+        character_id: p1Id,
+        name: "Corp Deposit Test",
+      });
+      corpId = (createResult as Record<string, unknown>).corp_id as string;
+      const inviteCode = (createResult as Record<string, unknown>)
+        .invite_code as string;
+      await apiOk("corporation_join", {
+        character_id: p2Id,
+        corp_id: corpId,
+        invite_code: inviteCode,
+      });
+
+      const ship = await createCorpShip(corpId, 0, "Deposit Probe");
+      corpShipId = ship.shipId;
+      await setShipCredits(corpShipId, 3000);
+    });
+
+    await t.step("corp ship deposits 1000 to P1's bank via ship_id", async () => {
+      await setMegabankBalance(p1Id, 0);
+      const result = await apiOk("bank_transfer", {
+        direction: "deposit",
+        ship_id: corpShipId,
+        actor_character_id: p1Id,
+        target_player_name: P1,
+        amount: 1000,
+      });
+      assertEquals(
+        (result as Record<string, unknown>).ship_credits_after,
+        2000,
+        "Corp ship should have 2000 credits left",
+      );
+      assertEquals(
+        (result as Record<string, unknown>).credits_in_bank_after,
+        1000,
+        "P1 bank should have 1000 credits",
+      );
+    });
+
+    await t.step("DB: corp ship credits deducted", async () => {
+      const ship = await queryShip(corpShipId);
+      assertExists(ship);
+      assertEquals(ship.credits, 2000);
+    });
+
+    await t.step("DB: P1 bank balance increased", async () => {
+      const char = await queryCharacter(p1Id);
+      assertExists(char);
+      assertEquals(char.credits_in_megabank, 1000);
+    });
+
+    await t.step("corp ship deposits 500 to P2's bank (different member)", async () => {
+      await setMegabankBalance(p2Id, 0);
+      const result = await apiOk("bank_transfer", {
+        direction: "deposit",
+        ship_id: corpShipId,
+        actor_character_id: p1Id,
+        target_player_name: P2,
+        amount: 500,
+      });
+      assertEquals(
+        (result as Record<string, unknown>).ship_credits_after,
+        1500,
+        "Corp ship should have 1500 credits left",
+      );
+      assertEquals(
+        (result as Record<string, unknown>).credits_in_bank_after,
+        500,
+        "P2 bank should have 500 credits",
+      );
+    });
+
+    await t.step("DB: P2 bank balance increased", async () => {
+      const char = await queryCharacter(p2Id);
+      assertExists(char);
+      assertEquals(char.credits_in_megabank, 500);
+    });
+  },
+});
+
+// ============================================================================
 // Group 2: Deposit failure cases
 // ============================================================================
 

@@ -526,6 +526,15 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
             user_aggregator._user_idle_controller._user_idle_timeout = (
                 idle_report_time + idle_report_count * IDLE_REPORT_INCREMENT_SECS
             )
+        elif voice_agent.task_groups:
+            # Tasks running but report was skipped (cooldown). Restart the
+            # timer with the remaining cooldown so it fires again later —
+            # otherwise the timer dies because BotStoppedSpeakingFrame
+            # never fires when we don't speak.
+            remaining = voice_agent.idle_report_cooldown_remaining()
+            if remaining > 0:
+                user_aggregator._user_idle_controller._user_idle_timeout = remaining + 0.5
+                await user_aggregator._user_idle_controller._start_idle_timer()
 
     @user_aggregator.event_handler("on_user_turn_started")
     async def on_user_turn_started(aggregator, strategy):

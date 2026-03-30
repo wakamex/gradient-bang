@@ -367,7 +367,7 @@ BANK_WITHDRAW = FunctionSchema(
 
 PLACE_FIGHTERS = FunctionSchema(
     name="place_fighters",
-    description="Leave fighters behind in the current sector as a garrison.",
+    description="Leave fighters behind in the current sector as a garrison. Not allowed in Federation Space or border sectors (Neutral sectors with a direct warp to Federation Space).",
     properties={
         "sector": {
             "type": "integer",
