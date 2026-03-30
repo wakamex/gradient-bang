@@ -30,6 +30,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMMessagesAppendFrame,
+    LLMRunFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.processors.frameworks.rtvi import RTVIProcessor, RTVIServerMessageFrame
@@ -366,12 +367,18 @@ class VoiceAgent(LLMAgent):
     async def process_deferred_tool_frames(
         self, frames: list[tuple[Frame, FrameDirection]]
     ) -> list[tuple[Frame, FrameDirection]]:
-        # Silently append deferred events to context without triggering inference.
-        # The tool result already gets its own inference via function calling.
-        # Task completions bypass deferral entirely (delivered via super().queue_frame).
+        # Deferred event-driven tool results still need one follow-up inference
+        # once the real data is in context. Coalesce multiple deferred triggers
+        # into a single run to avoid the duplicate-output regressions this path
+        # was originally added to prevent. Task completions still bypass deferral
+        # entirely via super().queue_frame().
+        needs_inference = False
         for f, d in frames:
             if isinstance(f, LLMMessagesAppendFrame) and f.run_llm:
+                needs_inference = True
                 f.run_llm = False
+        if needs_inference:
+            frames.append((LLMRunFrame(), FrameDirection.DOWNSTREAM))
         return frames
 
     # ── Request ID tracking ────────────────────────────────────────────
