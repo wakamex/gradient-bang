@@ -1007,6 +1007,7 @@ class TestEventDrivenToolErrors:
         active_task = MagicMock(spec=TaskAgent)
         active_task._is_corp_ship = False
         agent._children = [active_task]
+        agent._locked_ships = {agent._character_id}  # Player task is active
         params = MagicMock()
         params.arguments = {}
         params.result_callback = AsyncMock()
@@ -1252,7 +1253,7 @@ class TestCorpShipRouting:
 
     @pytest.mark.asyncio
     async def test_ship_lock_released_after_task_completes(self):
-        """Ship lock is released when on_task_response removes the child."""
+        """Ship lock is released; player agent stays in _children for reuse."""
         from gradientbang.pipecat_server.subagents.task_agent import TaskAgent
         from gradientbang.subagents.bus.messages import BusTaskResponseMessage
         from gradientbang.subagents.agents.task_group import TaskStatus
@@ -1294,7 +1295,9 @@ class TestCorpShipRouting:
         await agent.on_task_response(msg)
 
         assert agent._character_id not in agent._locked_ships
-        assert not any(c.name == task_name for c in agent._children)
+        # Player agent stays in _children for reuse (not ended)
+        assert any(c.name == task_name for c in agent._children)
+        agent.send_message.assert_not_called()  # No BusEndAgentMessage sent
 
     @pytest.mark.asyncio
     async def test_error_after_add_agent_cleans_up_ship_lock(self):
@@ -1322,12 +1325,118 @@ class TestCorpShipRouting:
         assert len(agent._pending_tasks) == 0
 
     @pytest.mark.asyncio
-    async def test_close_tasks_clears_ship_locks(self):
-        """close_tasks() clears _locked_ships even if on_task_response never fires."""
+    async def test_player_agent_reused_across_tasks(self):
+        """Second player task reuses the idle agent instead of creating a new one."""
+        from gradientbang.pipecat_server.subagents.task_agent import TaskAgent
+        from gradientbang.subagents.bus.messages import BusTaskResponseMessage
+        from gradientbang.subagents.agents.task_group import TaskStatus
+
         agent = _make_voice_agent()
         agent._task_groups = {}
-        agent._locked_ships = {"ship-1", "ship-2"}
+        agent._children = []
+        agent._inject_context = AsyncMock()
+        agent._queue_task_completion_event = AsyncMock()
+
+        async def add_agent(task_agent):
+            await asyncio.sleep(0)
+            agent._children.append(task_agent)
+
+        agent.add_agent = AsyncMock(side_effect=add_agent)
+        agent.request_task = AsyncMock()
+
+        # First task — creates a new agent
+        params1 = MagicMock()
+        params1.arguments = {"task_description": "Mine resources"}
+        result1 = await agent._handle_start_task(params1)
+        assert result1["success"]
+        first_agent_name = result1["task_id"]
+        assert agent.add_agent.call_count == 1
+
+        # Complete the first task
+        child = next(c for c in agent._children if c.name == first_agent_name)
+        child._active_task_id = None  # Mark as idle
+        agent._locked_ships.discard(agent._character_id)
+
+        # Second task — should reuse the existing idle agent
+        params2 = MagicMock()
+        params2.arguments = {"task_description": "Trade goods"}
+        result2 = await agent._handle_start_task(params2)
+        assert result2["success"]
+        assert result2["task_id"] == first_agent_name  # Same agent reused
+        assert agent.add_agent.call_count == 1  # No new add_agent call
+        agent.request_task.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("gradientbang.pipecat_server.subagents.voice_agent.AsyncGameClient")
+    async def test_corp_agent_destroyed_after_task(self, mock_client_cls):
+        """Corp ship agent is ended and removed from _children after task completes."""
+        from gradientbang.pipecat_server.subagents.task_agent import TaskAgent
+        from gradientbang.subagents.bus.messages import BusTaskResponseMessage
+        from gradientbang.subagents.agents.task_group import TaskStatus
+
+        agent = _make_voice_agent()
+        agent._task_groups = {}
+        agent._children = []
+        agent._inject_context = AsyncMock()
+        agent._queue_task_completion_event = AsyncMock()
+        agent._VoiceAgent__game_client.base_url = "http://localhost"
+        mock_client_cls.return_value = MagicMock()
+
+        async def add_agent(task_agent):
+            await asyncio.sleep(0)
+            agent._children.append(task_agent)
+
+        agent.add_agent = AsyncMock(side_effect=add_agent)
+        agent._is_corp_ship_id = AsyncMock(return_value=True)
+
+        # Start corp task
+        params = MagicMock()
+        params.arguments = {"task_description": "Trade", "ship_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
+        result = await agent._handle_start_task(params)
+        assert result["success"]
+        task_name = result["task_id"]
+        assert len(agent._children) == 1
+
+        # Simulate on_task_response
+        child = agent._children[0]
+        msg = MagicMock(spec=BusTaskResponseMessage)
+        msg.source = task_name
+        msg.task_id = "framework-task-1"
+        msg.status = TaskStatus.COMPLETED
+        msg.response = {"message": "Done"}
+        agent.send_message = AsyncMock()
+        agent._tool_call_inflight = 0
+        agent._assistant_cycle_active = False
+        agent._assistant_cycle_idle_event.set()
+        agent._bot_stopped_speaking_at = 0.0
+        agent._update_polling_scope = MagicMock()
+
+        await agent.on_task_response(msg)
+
+        # Corp agent should be removed
+        assert len(agent._children) == 0
+        # BusEndAgentMessage should have been sent
+        agent.send_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_close_tasks_ends_idle_player_agent(self):
+        """close_tasks() ends all task agents including idle player agent."""
+        from gradientbang.pipecat_server.subagents.task_agent import TaskAgent
+
+        agent = _make_voice_agent()
+        agent._task_groups = {}
+        agent._children = []
+        agent._locked_ships = {"ship-1"}
+        agent.send_message = AsyncMock()
+
+        # Add an idle player task agent to children
+        mock_task_agent = MagicMock(spec=TaskAgent)
+        mock_task_agent.name = "task_abc123"
+        mock_task_agent._is_corp_ship = False
+        agent._children.append(mock_task_agent)
 
         await agent.close_tasks()
 
         assert agent._locked_ships == set()
+        assert len(agent._children) == 0
+        agent.send_message.assert_called_once()  # BusEndAgentMessage sent

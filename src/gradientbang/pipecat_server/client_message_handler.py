@@ -36,6 +36,7 @@ class ClientMessageHandler:
         user_mute_state: dict,
         user_unmuted_event: asyncio.Event,
         llm_context=None,
+        voice_agent=None,
     ):
         self._game_client = game_client
         self._character_id = character_id
@@ -47,6 +48,7 @@ class ClientMessageHandler:
         self._user_mute_state = user_mute_state
         self._user_unmuted_event = user_unmuted_event
         self._llm_context = llm_context
+        self._voice_agent = voice_agent
 
     @property
     def _pipeline_task(self):
@@ -509,6 +511,63 @@ class ClientMessageHandler:
             )
         )
 
+    async def _handle_dump_task_context(self, msg_type, msg_data):
+        """Debug: dump a task agent's LLM context back to the client."""
+        import json
+
+        from gradientbang.pipecat_server.subagents.task_agent import TaskAgent
+
+        task_id = msg_data.get("task_id") if isinstance(msg_data, dict) else None
+        if not task_id or not self._voice_agent:
+            return
+
+        # Match by agent name, active task UUID, or fall back to the
+        # single player task agent (whose _active_task_id is cleared after
+        # completion but still holds the cached context).
+        child = next(
+            (c for c in self._voice_agent.children
+             if isinstance(c, TaskAgent)
+             and (c.name == task_id or c._active_task_id == task_id)),
+            None,
+        )
+        if not child:
+            child = next(
+                (c for c in self._voice_agent.children
+                 if isinstance(c, TaskAgent) and not c._is_corp_ship),
+                None,
+            )
+        if not child:
+            return
+
+        messages = child.get_context_dump()
+        if not messages:
+            return
+
+        def safe_serialize(msg):
+            try:
+                json.dumps(msg)
+                return msg
+            except (TypeError, ValueError):
+                return {"role": msg.get("role", "unknown"), "content": str(msg.get("content", ""))}
+
+        safe_messages = [safe_serialize(m) for m in messages]
+        formatted = json.dumps(safe_messages, indent=2, ensure_ascii=False)
+        formatted = formatted.replace("\\n", "\n")
+
+        await self._rtvi.push_frame(
+            RTVIServerMessageFrame(
+                {
+                    "frame_type": "event",
+                    "event": "debug.task-context",
+                    "payload": {
+                        "task_id": task_id,
+                        "message_count": len(safe_messages),
+                        "formatted": formatted,
+                    },
+                }
+            )
+        )
+
     # ── Dispatch table ────────────────────────────────────────────────
 
     _HANDLERS = {
@@ -532,4 +591,5 @@ class ClientMessageHandler:
         "assign-quest": _handle_assign_quest,
         "custom-message": _handle_custom_message,
         "dump-llm-context": _handle_dump_llm_context,
+        "dump-task-context": _handle_dump_task_context,
     }
