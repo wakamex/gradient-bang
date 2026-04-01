@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -485,6 +486,41 @@ class TaskAgent(LLMAgent):
                 return list(messages)
         return self._last_context_dump
 
+    def _upload_context_snapshot(self) -> None:
+        """Upload LLM context to S3 for debugging (fire-and-forget)."""
+        from gradientbang.pipecat_server.context_upload import upload_context
+
+        task_id = self._active_task_id
+        if not task_id or not self._llm_context:
+            return
+        messages = list(self._llm_context.get_messages())
+        if not messages:
+            return
+
+        session_id = os.environ.get("BOT_INSTANCE_ID", "unknown")
+        s3_key = f"contexts/{self._character_id}/{session_id}/tasks/{task_id}.json"
+
+        duration_s: Optional[float] = None
+        if self._task_start_monotonic is not None:
+            duration_s = round(time.perf_counter() - self._task_start_monotonic, 2)
+
+        upload_context(
+            s3_key=s3_key,
+            messages=messages,
+            db_row={
+                "character_id": self._character_id,
+                "session_id": session_id,
+                "snapshot_type": "task",
+                "task_id": task_id,
+                "s3_key": s3_key,
+                "message_count": len(messages),
+                "snapshot_reason": "completion",
+                "task_description": self._task_description,
+                "task_status": self._task_finished_status,
+                "task_duration_s": duration_s,
+            },
+        )
+
     def _set_client_task_id(self, task_id: Optional[str]) -> None:
         if not self._tag_outbound_rpcs_with_task_id or not task_id:
             return
@@ -781,6 +817,10 @@ class TaskAgent(LLMAgent):
         await self._complete_task()
 
     async def _complete_task(self):
+        try:
+            self._upload_context_snapshot()
+        except Exception as exc:
+            logger.error(f"TaskAgent context upload failed: {exc}")
         await self._drain_pending_task_outputs()
         self._clear_awaited_completion()
         self._clear_client_task_id(self._active_task_id)

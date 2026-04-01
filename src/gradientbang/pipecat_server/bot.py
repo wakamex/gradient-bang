@@ -331,14 +331,50 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
 
     say_text_voice_guard = SayTextVoiceGuard(say_text_restore_voice)
 
+    # ── Voice context upload state ────────────────────────────────────
+    from gradientbang.pipecat_server.context_upload import upload_context as _upload_context
+
+    _voice_ctx_seq = 1  # Sequence number; increments on compaction
+    _voice_ctx_last_uploaded_count = 0  # Message count at last upload; skip if unchanged
+
+    def _upload_voice_context(reason: str) -> None:
+        nonlocal _voice_ctx_seq, _voice_ctx_last_uploaded_count
+        msgs = list(context.get_messages())
+        if not msgs:
+            return
+        if reason == "periodic" and len(msgs) == _voice_ctx_last_uploaded_count:
+            return  # Nothing changed
+        session_id = BOT_INSTANCE_ID or "unknown"
+        s3_key = f"contexts/{character_id}/{session_id}/voice/{_voice_ctx_seq:04d}.json"
+        _voice_ctx_last_uploaded_count = len(msgs)
+        _upload_context(
+            s3_key=s3_key,
+            messages=msgs,
+            db_row={
+                "character_id": character_id,
+                "session_id": session_id,
+                "snapshot_type": "voice",
+                "s3_key": s3_key,
+                "message_count": len(msgs),
+                "snapshot_reason": reason,
+            },
+        )
+
     @assistant_aggregator.event_handler("on_summary_applied")
     async def on_summary_applied(aggregator, summarizer, event):
+        nonlocal _voice_ctx_seq
         logger.info(
             f"Context summarized: {event.original_message_count} -> "
             f"{event.new_message_count} messages "
             f"({event.summarized_message_count} compressed, "
             f"{event.preserved_message_count} preserved)"
         )
+        # Upload pre-compaction era, then bump sequence for the new era
+        try:
+            _upload_voice_context("compaction")
+        except Exception as exc:
+            logger.error(f"Compaction voice context upload failed: {exc}")
+        _voice_ctx_seq += 1
         await rtvi.push_frame(
             RTVIServerMessageFrame(
                 {
@@ -558,9 +594,22 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
         logger.info("Client disconnected")
         await main_agent.cancel()
 
+    # ── Periodic voice context upload (every 10 minutes) ─────────────
+
+    _periodic_upload_task: asyncio.Task | None = None
+
+    async def _periodic_voice_context_upload():
+        while True:
+            await asyncio.sleep(600)
+            try:
+                _upload_voice_context("periodic")
+            except Exception as exc:
+                logger.error(f"Periodic voice context upload failed: {exc}")
+
     # ── Run ────────────────────────────────────────────────────────────
 
     try:
+        _periodic_upload_task = asyncio.create_task(_periodic_voice_context_upload())
         logger.info("Starting AgentRunner…")
         await agent_runner.run()
         logger.info("AgentRunner finished")
@@ -570,6 +619,12 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
     except Exception as e:
         logger.exception(f"AgentRunner error: {e}")
     finally:
+        if _periodic_upload_task is not None:
+            _periodic_upload_task.cancel()
+        try:
+            _upload_voice_context("shutdown")
+        except Exception as exc:
+            logger.error(f"Shutdown voice context upload failed: {exc}")
         try:
             await voice_agent.close_tasks()
         except Exception as exc:
