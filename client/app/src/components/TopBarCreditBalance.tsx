@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import type { AnimationPlaybackControls } from "motion/react"
 import { animate, AnimatePresence, motion, useMotionValue } from "motion/react"
@@ -58,7 +58,6 @@ const useBalanceAnimation = (balance: number | undefined) => {
   useEffect(() => {
     if (balance == null) return
     if (!hasReceivedRealValue.current) {
-      // First real value — snap to it without animating
       hasReceivedRealValue.current = true
       prevBalance.current = balance
       value.set(balance)
@@ -85,7 +84,6 @@ const useBalanceAnimation = (balance: number | undefined) => {
     const absDelta = Math.abs(delta)
     const duration = Math.min(3, Math.max(0.5, Math.log10(absDelta + 1) * 0.6))
 
-    // Remove old animation from tracking before stopping
     if (controls.current) activeControls.delete(controls.current)
     controls.current?.stop()
 
@@ -111,8 +109,23 @@ const useBalanceAnimation = (balance: number | undefined) => {
     startSound(firstAnimation)
   }, [balance, value])
 
-  const removeBubble = (id: number) =>
-    setState((prev) => ({ ...prev, bubbles: prev.bubbles.filter((b) => b.id !== id) }))
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (controls.current) {
+        activeControls.delete(controls.current)
+        controls.current.stop()
+        controls.current = null
+        stopSoundIfIdle()
+      }
+    }
+  }, [])
+
+  const removeBubble = useCallback(
+    (id: number) =>
+      setState((prev) => ({ ...prev, bubbles: prev.bubbles.filter((b) => b.id !== id) })),
+    []
+  )
 
   return { ...state, removeBubble }
 }
