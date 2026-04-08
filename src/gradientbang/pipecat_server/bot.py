@@ -6,8 +6,10 @@ from dotenv import load_dotenv
 from loguru import logger
 
 BOT_INSTANCE_ID: str | None = None
+DEFAULT_VOICE_ID = "ec1e269e-9ca0-402f-8a18-58e0e022355a"
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
+    InterruptionFrame,
     LLMFullResponseStartFrame,
     TTSUpdateSettingsFrame,
 )
@@ -166,17 +168,20 @@ async def _startup_init_stt():
 
 
 @traced
-async def _startup_init_tts():
+async def _startup_init_tts(voice_id: str = DEFAULT_VOICE_ID):
     """Initialize TTS service (traced span)."""
     cartesia_key = os.getenv("CARTESIA_API_KEY", "")
     if not cartesia_key:
         logger.warning("CARTESIA_API_KEY is not set; TTS may fail.")
-    return CartesiaTTSService(api_key=cartesia_key, voice_id="ec1e269e-9ca0-402f-8a18-58e0e022355a")
+    return CartesiaTTSService(api_key=cartesia_key, voice_id=voice_id)
 
 
 @traced
 async def bot_startup(
-    character_id_hint: str | None, character_name_hint: str | None, server_url: str
+    character_id_hint: str | None,
+    character_name_hint: str | None,
+    server_url: str,
+    voice_id: str = DEFAULT_VOICE_ID,
 ):
     """Traced startup wrapper — initializes all services for the bot pipeline."""
 
@@ -207,7 +212,7 @@ async def bot_startup(
     (local_api_server, character_id, character_display_name), stt, tts = await asyncio.gather(
         _chain_a(),
         _startup_init_stt(),
-        _startup_init_tts(),
+        _startup_init_tts(voice_id),
     )
 
     # Create game client directly
@@ -231,6 +236,9 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
     body = getattr(runner_args, "body", None) or {}
     character_id_hint = body.get("character_id") or os.getenv("BOT_TEST_CHARACTER_ID")
     character_name_hint = body.get("character_name")
+    voice_id = body.get("voice_id") or DEFAULT_VOICE_ID
+    personality_tone = body.get("personality_tone", "").strip()
+    bypass_tutorial = bool(body.get("bypass_tutorial", False))
 
     (
         rtvi,
@@ -240,7 +248,7 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
         game_client,
         stt,
         tts,
-    ) = await bot_startup(character_id_hint, character_name_hint, server_url)
+    ) = await bot_startup(character_id_hint, character_name_hint, server_url, voice_id)
 
     token_usage_metrics = TokenUsageMetricsProcessor(source="bot")
 
@@ -250,11 +258,20 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
             "role": "system",
             "content": build_voice_agent_prompt(),
         },
+    ]
+    if personality_tone:
+        messages.append(
+            {
+                "role": "system",
+                "content": f"Adopt the following personality and tone for all responses: {personality_tone}",
+            }
+        )
+    messages.append(
         {
             "role": "user",
             "content": f"<start_of_session>Character Name: {character_display_name}</start_of_session>",
         },
-    ]
+    )
 
     # Create dedicated Gemini Flash LLM for context summarization
     summarization_llm = create_llm_service(
@@ -277,6 +294,7 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
     # Context starts empty — messages and tools are injected into the
     # VoiceAgent via LLMAgentActivationArgs on the bus.
     context = LLMContext()
+    mute_strategy = TextInputBypassFirstBotMuteStrategy()
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
@@ -289,7 +307,7 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
                 ],
             ),
             user_mute_strategies=[
-                TextInputBypassFirstBotMuteStrategy(),
+                mute_strategy,
             ],
             vad_analyzer=SileroVADAnalyzer(),
         ),
@@ -444,6 +462,7 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
     from gradientbang.pipecat_server.frames import TaskActivityFrame
     from gradientbang.pipecat_server.idle_report import IdleReportProcessor
     from gradientbang.pipecat_server.subagents.event_relay import EventRelay
+    from gradientbang.pipecat_server.subagents.scripted_agent import ScriptedAgent
     from gradientbang.pipecat_server.subagents.voice_agent import VoiceAgent
     from gradientbang.subagents.agents import BaseAgent, LLMAgentActivationArgs
     from gradientbang.subagents.bus import BusBridgeProcessor
@@ -462,12 +481,7 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
 
         async def on_agent_ready(self, data: AgentReadyData) -> None:
             await super().on_agent_ready(data)
-            if data.agent_name == "player":
-                logger.info("MainAgent: VoiceAgent ready, activating")
-                await self.activate_agent(
-                    "player",
-                    args=LLMAgentActivationArgs(messages=messages, run_llm=False),
-                )
+            logger.info(f"MainAgent: {data.agent_name} ready")
 
         def build_pipeline_task(self, pipeline: Pipeline) -> PipelineTask:
             task = PipelineTask(
@@ -505,8 +519,9 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
 
             @transport.event_handler("on_client_connected")
             async def on_client_connected(transport, client):
-                logger.info("Client connected, adding VoiceAgent")
+                logger.info("Client connected, adding agents")
                 await self.add_agent(voice_agent)
+                await self.add_agent(scripted_agent)
 
             return Pipeline(
                 [
@@ -548,6 +563,46 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
     )
     voice_agent._event_relay = event_relay
 
+    async def _on_tutorial_complete():
+        logger.info("Tutorial complete, switching to VoiceAgent")
+        await rtvi.push_frame(
+            RTVIServerMessageFrame(
+                {
+                    "frame_type": "event",
+                    "event": "tutorial.complete",
+                    "payload": {},
+                }
+            )
+        )
+        # Interrupt any in-flight scripted TTS by injecting directly into the
+        # TTS service. We can't push via the main pipeline source (the
+        # BusBridgeProcessor swallows upstream frames into the bus instead of
+        # forwarding downstream), and we can't route via the scripted agent's
+        # bus path either (the InterruptionFrame would broadcast to the voice
+        # agent and cancel its activation).
+        await tts.queue_frame(InterruptionFrame())
+        await main_agent.deactivate_agent("scripted")
+        # Reset mute strategy so the normal first-bot-speech logic applies fresh.
+        # Release force_mute AFTER deactivating scripted agent to avoid any
+        # in-flight BotStoppedSpeakingFrame from the tutorial triggering unmute.
+        await mute_strategy.reset()
+        mute_strategy.force_mute = False
+        # run_llm=False — VoiceAgent.on_activated will call
+        # event_relay._maybe_inject_onboarding(), which queues the
+        # onboarding/session.start event with run_llm=True. Letting activation
+        # also run the LLM would cause a double inference.
+        await main_agent.activate_agent(
+            "player",
+            args=LLMAgentActivationArgs(messages=messages, run_llm=False),
+        )
+
+    scripted_agent = ScriptedAgent(
+        "scripted",
+        bus=agent_runner.bus,
+        rtvi_processor=rtvi,
+        on_complete=_on_tutorial_complete,
+    )
+
     idle_report_processor = IdleReportProcessor(
         idle_seconds=float(os.getenv("BOT_IDLE_REPORT_TIME", "7.5")),
         cooldown_seconds=float(os.getenv("BOT_IDLE_REPORT_COOLDOWN", "30")),
@@ -560,9 +615,14 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
 
     # ── Event handlers ─────────────────────────────────────────────────
 
+    is_first_visit = False
+
     @rtvi.event_handler("on_client_ready")
     async def on_client_ready(rtvi):
+        nonlocal is_first_visit
+
         async def _join():
+            nonlocal is_first_visit
             await asyncio.sleep(2)
             await game_client.pause_event_delivery()
             result = await event_relay.join()
@@ -571,7 +631,23 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
                 req_id = result.get("request_id")
                 if req_id:
                     voice_agent.track_request_id(req_id)
+                is_first_visit = bool(result.get("is_first_visit", False))
             await game_client.resume_event_delivery()
+
+            # Activate the correct agent based on first visit status
+            if is_first_visit and not bypass_tutorial:
+                logger.info("First visit detected, activating ScriptedAgent")
+                mute_strategy.force_mute = True
+                await main_agent.activate_agent("scripted")
+            else:
+                if is_first_visit and bypass_tutorial:
+                    logger.info(
+                        "First visit detected but bypass_tutorial=True; skipping ScriptedAgent"
+                    )
+                await main_agent.activate_agent(
+                    "player",
+                    args=LLMAgentActivationArgs(messages=messages, run_llm=False),
+                )
 
         asyncio.create_task(_join())
 
@@ -587,6 +663,7 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
         user_unmuted_event=user_unmuted_event,
         llm_context=context,
         voice_agent=voice_agent,
+        on_skip_tutorial=_on_tutorial_complete,
     )
 
     @rtvi.event_handler("on_client_message")

@@ -28,6 +28,7 @@ export const Title = ({ onViewNext }: { onViewNext: () => void }) => {
   const [state, setState] = useState<"idle" | "join">("idle")
   const [error, setError] = useState<boolean>(false)
   const hasStartedMusic = useRef(false)
+  const titleVideoRef = useRef<HTMLVideoElement>(null)
 
   const handleSignIn = async () => {
     setIsLoading(true)
@@ -61,10 +62,26 @@ export const Title = ({ onViewNext }: { onViewNext: () => void }) => {
     }
   }
 
+  const handleCharacterSelect = (characterId: string, isNewCharacter: boolean) => {
+    console.debug(
+      "%cCharacter selected, proceeding to next view",
+      "color: blue; font-weight: bold;",
+      { characterId, isNewCharacter }
+    )
+    setCharacterId(characterId)
+    if (isNewCharacter) {
+      titleVideoRef.current?.pause()
+      setActiveModal("intro_tutorial")
+    } else {
+      onViewNext()
+    }
+  }
+
   return (
     <div className="relative h-screen w-screen overflow-hidden">
       <div className="absolute inset-0">
         <video
+          ref={titleVideoRef}
           src={TitleVideo}
           autoPlay
           muted
@@ -233,21 +250,14 @@ export const Title = ({ onViewNext }: { onViewNext: () => void }) => {
       </div>
       <Settings />
       <Leaderboard />
-      <CharacterSelectDialog
-        onCharacterSelect={(characterId, isNewCharacter) => {
-          setCharacterId(characterId)
-          if (isNewCharacter) {
-            setActiveModal("intro_tutorial")
-          } else {
-            onViewNext()
-          }
-        }}
-      />
-      <IntroTutorial onContinue={onViewNext} />
+      <CharacterSelectDialog onCharacterSelect={handleCharacterSelect} />
       <div className="absolute bottom-0 right-0 p-4 z-99 flex flex-row items-center gap-2 bg-background select-none">
         <span className="text-xs text-muted-foreground uppercase tracking-wider">Built by</span>
         <PipecatSVG className="h-[16px] text-white" />
       </div>
+
+      {/** Intro Tutorial Video Modal */}
+      <IntroTutorial onContinue={onViewNext} />
     </div>
   )
 }

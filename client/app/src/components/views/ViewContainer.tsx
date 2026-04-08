@@ -61,8 +61,8 @@ export const ViewContainer = ({ error }: { error?: string | null }) => {
         transition={{ duration: 0.4, ease: "easeInOut" }}
         className="relative h-screen w-screen overflow-hidden"
       >
-        {viewState === "title" && <Title onViewNext={() => handleViewStateChange("game")} />}
         {viewState === "preload" && <Preload onComplete={() => handleViewStateChange("title")} />}
+        {viewState === "title" && <Title onViewNext={() => handleViewStateChange("game")} />}
         {viewState === "game" && (
           <>
             <AnimatePresence>

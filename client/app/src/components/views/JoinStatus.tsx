@@ -7,6 +7,7 @@ import useGameStore from "@/stores/game"
 
 export const JoinStatus = ({ handleStart }: { handleStart: () => void }) => {
   const gameState = useGameStore.use.gameState()
+  const setActiveModal = useGameStore.use.setActiveModal()
   const gameStateMessage = useGameStore.use.gameStateMessage?.()
   const diamondFXInstance = useGameStore.use.diamondFXInstance?.()
   const statusPanelRef = useRef<HTMLDivElement>(null)
@@ -14,7 +15,20 @@ export const JoinStatus = ({ handleStart }: { handleStart: () => void }) => {
   useEffect(() => {
     if (gameState !== "not_ready" || !diamondFXInstance || !statusPanelRef.current) return
 
-    diamondFXInstance.start(statusPanelRef.current.id)
+    // Defer start past the initial render storm — kicking off DiamondFX while
+    // the rest of the screen is still mounting causes a visible jank spike.
+    const panelId = statusPanelRef.current.id
+    let innerRaf = 0
+    const outerRaf = requestAnimationFrame(() => {
+      innerRaf = requestAnimationFrame(() => {
+        diamondFXInstance.start(panelId)
+      })
+    })
+
+    return () => {
+      cancelAnimationFrame(outerRaf)
+      cancelAnimationFrame(innerRaf)
+    }
   }, [gameState, diamondFXInstance])
 
   useEffect(() => {
@@ -22,6 +36,7 @@ export const JoinStatus = ({ handleStart }: { handleStart: () => void }) => {
 
     diamondFXInstance?.clear(true)
 
+    // Fade out theme music over 1 second
     useAudioStore.getState().fadeOut("theme", { duration: 1000 })
   }, [gameState, diamondFXInstance])
 
@@ -34,6 +49,7 @@ export const JoinStatus = ({ handleStart }: { handleStart: () => void }) => {
         onAnimationComplete={() => {
           if (gameState !== "not_ready") return
           handleStart()
+          setActiveModal(undefined)
         }}
       >
         <div id="status-panel" className="screen p-4" ref={statusPanelRef}>

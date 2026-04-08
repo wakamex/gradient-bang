@@ -367,7 +367,7 @@ EVENT_CONFIGS: dict[str, EventConfig] = {
     # Using ALWAYS here would double-fire (same pattern as task.finish).
     "quest.step_completed": EventConfig(inference=InferenceRule.VOICE_AGENT),
     "quest.completed": EventConfig(inference=InferenceRule.VOICE_AGENT),
-    "quest.reward_claimed": EventConfig(inference=InferenceRule.ALWAYS, debounce_seconds=0.8),
+    "quest.reward_claimed": EventConfig(inference=InferenceRule.ALWAYS, debounce_seconds=2.0),
     # Task-scoped allowlisted (direct events pass through when task-scoped)
     "trade.executed": EventConfig(task_scoped_allowlisted=True),
     "port.update": EventConfig(task_scoped_allowlisted=True),
@@ -585,6 +585,13 @@ class EventRelay:
         if self._onboarding_complete:
             return
         if not self._first_status_delivered or self.is_new_player is None:
+            return
+        # Wait until the voice agent is active so the injection actually
+        # reaches the user. While inactive, the LLM run would produce no
+        # audible output (the edge sink drops outbound frames) and would
+        # pollute context. The caller (bot.py _on_tutorial_complete) re-invokes
+        # this method after activation to deliver the deferred event.
+        if not self._task_state.active:
             return
         self._onboarding_complete = True
         if self.is_new_player:

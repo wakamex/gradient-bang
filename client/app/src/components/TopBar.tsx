@@ -1,6 +1,7 @@
 import { FilmStripIcon, MedalIcon, SlidersHorizontalIcon } from "@phosphor-icons/react"
 
 import { TopBarCreditBalance } from "@/components/TopBarCreditBalance"
+import { TopBarDisconnectButton } from "@/components/TopBarDisconnectButton"
 import useGameStore from "@/stores/game"
 
 import { CharacterBadge } from "./CharacterBadge"
@@ -36,7 +37,7 @@ export const TopBar = () => {
         </div>
       )}
       <div className="flex-1" />
-      <div className="flex flex-row gap-1.5 p-1.5">
+      <div className="flex flex-row gap-1.5 p-1.5 items-center">
         {enableCapture && (
           <Tooltip>
             <TooltipTrigger asChild>
@@ -75,6 +76,9 @@ export const TopBar = () => {
             <p>Settings</p>
           </TooltipContent>
         </Tooltip>
+
+        <DotDivider />
+        <TopBarDisconnectButton />
       </div>
     </header>
   )

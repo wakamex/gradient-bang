@@ -16,7 +16,7 @@ const CharacterCard = ({
 }: {
   character: CharacterSelectResponse
   index: number
-  onSelect: (characterId: string) => void
+  onSelect: (characterId: string, isNewCharacter: boolean) => void
 }) => {
   const playSound = useAudioStore.use.playSound()
 
@@ -27,6 +27,18 @@ const CharacterCard = ({
   const onCardHover = useCallback(() => {
     playSound("chime1")
   }, [playSound])
+
+  const onHandleSelect = useCallback(
+    (selectedCharacter: CharacterSelectResponse) => {
+      console.debug(
+        "%cCharacter card selected",
+        "color: green; font-weight: bold;",
+        selectedCharacter
+      )
+      onSelect(selectedCharacter.character_id, selectedCharacter.is_first_visit)
+    },
+    [onSelect]
+  )
 
   return (
     <motion.div
@@ -44,11 +56,11 @@ const CharacterCard = ({
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: -20, scale: 0.95 }}
         transition={{ duration: 0.4, delay: 0.15 + index * 0.1, ease: "easeOut" }}
-        onClick={() => onSelect(character.character_id)}
+        onClick={() => onHandleSelect(character)}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault()
-            onSelect(character.character_id)
+            onHandleSelect(character)
           }
         }}
       >
@@ -81,7 +93,7 @@ export const CharacterSelect = ({
   onCharacterSelect,
   onIsCreating,
 }: {
-  onCharacterSelect: (characterId: string) => void
+  onCharacterSelect: (characterId: string, isNewCharacter: boolean) => void
   onIsCreating: () => void
 }) => {
   const characters = useGameStore.use.characters()
@@ -106,7 +118,9 @@ export const CharacterSelect = ({
                   key={character.character_id}
                   character={character}
                   index={index}
-                  onSelect={onCharacterSelect}
+                  onSelect={() =>
+                    onCharacterSelect(character.character_id, character.is_first_visit)
+                  }
                 />
               ))}
             </AnimatePresence>

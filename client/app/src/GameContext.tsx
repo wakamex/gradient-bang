@@ -4,6 +4,7 @@ import { RTVIEvent } from "@pipecat-ai/client-js"
 import { usePipecatClient, useRTVIClientEvent } from "@pipecat-ai/client-react"
 
 import { GameContext } from "@/hooks/useGameContext"
+import useAudioStore from "@/stores/audio"
 import { useConversationStore } from "@/stores/conversation"
 import useGameStore, { GameInitStateMessage } from "@/stores/game"
 import {
@@ -64,13 +65,17 @@ export function GameProvider({ children }: GameProviderProps) {
   const initialize = useCallback(async () => {
     console.debug("[GAME CONTEXT] Initializing...")
 
+    // Setters and store methods are stable references — pull them once.
+    const { setPlayerSessionId, setGameStateMessage, setGameState, getBotStartParams, settings } =
+      useGameStore.getState()
+
     // Set initial state
-    useGameStore.getState().setPlayerSessionId(null)
-    useGameStore.getState().setGameStateMessage(GameInitStateMessage.INIT)
-    useGameStore.getState().setGameState("initializing")
+    setPlayerSessionId(null)
+    setGameStateMessage(GameInitStateMessage.INIT)
+    setGameState("initializing")
 
     // 1. Construct and await heavier game instances
-    if (useGameStore.getState().settings.renderStarfield) {
+    if (settings.renderStarfield) {
       console.debug("[GAME CONTEXT] Waiting on Starfield ready...")
       await new Promise<void>((resolve) => {
         if (useGameStore.getState().starfieldReady) {
@@ -90,14 +95,13 @@ export function GameProvider({ children }: GameProviderProps) {
     }
 
     // 2. Connect to agent
-    useGameStore.getState().setGameStateMessage(GameInitStateMessage.CONNECTING)
+    setGameStateMessage(GameInitStateMessage.CONNECTING)
 
-    const characterId = useGameStore.getState().character_id
-    const accessToken = useGameStore.getState().access_token
+    const { character_id: characterId, access_token: accessToken } = useGameStore.getState()
     if (!characterId || !accessToken) {
       throw new Error("Attempting to connect to bot without a character ID or access token")
     }
-    const botStartParams = useGameStore.getState().getBotStartParams(characterId, accessToken)
+    const botStartParams = getBotStartParams(characterId, accessToken)
 
     console.debug("[GAME CONTEXT] Connecting with params", botStartParams)
 
@@ -108,22 +112,15 @@ export function GameProvider({ children }: GameProviderProps) {
       }
     } catch {
       console.error("[GAME CONTEXT] Error connecting to game server")
-      useGameStore.getState().setGameState("error")
+      setGameState("error")
       return
     }
 
     // 3. Wait for initial data and initialize anything that needs it
     // @TODO: pass initial config to starfield here
-    useGameStore.getState().setGameStateMessage(GameInitStateMessage.READY)
-
     console.debug("[GAME CONTEXT] Initialized, setting ready state")
-
-    // 4. Set ready state and dispatch start event to bot
-    useGameStore.getState().setGameStateMessage(GameInitStateMessage.READY)
-    useGameStore.getState().setGameState("ready")
-
-    // 5. Dispatch start event to bot to kick off the conversation
-    // dispatchAction({ type: "start" } as StartAction)
+    setGameStateMessage(GameInitStateMessage.READY)
+    setGameState("ready")
   }, [client])
 
   /**
@@ -1636,6 +1633,26 @@ export function GameProvider({ children }: GameProviderProps) {
             }
             case "debug.task-context-error": {
               useGameStore.getState().setDebugTaskContextError(e.payload.error as string)
+              break
+            }
+
+            // ----- TUTORIAL
+            case "tutorial.start": {
+              useGameStore.getState().handleTutorialStart()
+              useAudioStore.getState().fadeIn("tutorial", { volume: 0.3, duration: 6000 })
+              break
+            }
+            case "tutorial.step": {
+              useGameStore.getState().handleTutorialStep({
+                target: e.payload.target as string | undefined,
+                step: e.payload.step as number,
+              })
+              break
+            }
+            case "tutorial.complete": {
+              useGameStore.getState().handleTutorialComplete()
+              useAudioStore.getState().fadeOut("tutorial", { duration: 2000 })
+              useConversationStore.getState().clearMessages()
               break
             }
 

@@ -58,6 +58,7 @@ export interface GameState {
   corporation?: Corporation
   character_id?: string
   access_token?: string
+  bypassTutorial: boolean
   ship: ShipSelf
   ships: ActiveProperty<ShipSelf[]>
   sector?: Sector
@@ -98,6 +99,7 @@ export interface GameSlice extends GameState {
   setCharacterId: (characterId: string) => void
   setAccessToken: (accessToken: string) => void
   setCharacterAndToken: (characterId: string, accessToken: string) => void
+  setBypassTutorial: (bypassTutorial: boolean) => void
   addMessage: (message: ChatMessage) => void
   setChatHistory: (messages: ChatMessage[]) => void
   setPlayer: (player: Partial<PlayerSelf>) => void
@@ -136,6 +138,8 @@ export interface GameSlice extends GameState {
   createFetchPromise: (actionType: ActionType) => Promise<void>
   resolveFetchPromise: (actionType: ActionType) => void
   rejectFetchPromise: (actionType: ActionType, error?: unknown) => void
+
+  disconnectAndReset: () => void
 }
 
 const createGameSlice: StateCreator<GameStoreState, [], [], GameSlice> = (set, get) => ({
@@ -147,6 +151,7 @@ const createGameSlice: StateCreator<GameStoreState, [], [], GameSlice> = (set, g
   corporation: undefined,
   character_id: undefined,
   access_token: undefined,
+  bypassTutorial: false,
   ship: {} as ShipSelf,
   ships: { data: undefined, last_updated: null },
   sector: undefined,
@@ -210,6 +215,7 @@ const createGameSlice: StateCreator<GameStoreState, [], [], GameSlice> = (set, g
   setAccessToken: (accessToken: string) => set({ access_token: accessToken }),
   setCharacterAndToken: (characterId: string, accessToken: string) =>
     set({ character_id: characterId, access_token: accessToken }),
+  setBypassTutorial: (bypassTutorial: boolean) => set({ bypassTutorial }),
 
   setGameStateMessage: (gameStateMessage: string) => set({ gameStateMessage }),
   setState: (newState: Partial<GameState>) => set({ ...get(), ...newState }, true),
@@ -477,6 +483,11 @@ const createGameSlice: StateCreator<GameStoreState, [], [], GameSlice> = (set, g
     ),
 
   setGameState: (gameState: GameInitState) => set({ gameState }),
+
+  disconnectAndReset: () => {
+    usePipecatClientStore.getState().client?.disconnect()
+    window.location.reload()
+  },
 })
 
 // Selectors
