@@ -1333,6 +1333,7 @@ function buildPlayerSnapshot(
   playerType: string,
   knowledge: MapKnowledge,
   universeSize: number,
+  fedspaceSectorCount: number,
 ): Record<string, unknown> {
   // Derive stats from source field
   let sectorsVisited = 0;
@@ -1360,6 +1361,7 @@ function buildPlayerSnapshot(
     corp_sectors_visited: hasCorpKnowledge ? corpSectorsVisited : null,
     total_sectors_known: totalSectorsKnown,
     universe_size: universeSize,
+    fedspace_sector_count: fedspaceSectorCount,
     created_at: character.first_visit,
     last_active: character.last_active,
   };
@@ -1470,31 +1472,40 @@ export async function pgBuildStatusPayload(
   const sUniverse = sParallel.span("load_universe_size");
   const sSector = sParallel.span("build_sector_snapshot");
   const sCorp = sParallel.span("load_corporation_info");
-  const [knowledge, universeSize, sectorSnapshot, corporationPayload] =
-    await Promise.all([
-      pgLoadMapKnowledge(pg, characterId).then((r) => { sKnowledge.end(); return r; }),
-      pgLoadUniverseSize(pg).then((r) => { sUniverse.end(); return r; }),
-      (options?.sectorSnapshot
-        ? Promise.resolve(options.sectorSnapshot)
-        : pgBuildSectorSnapshot(pg, ship.current_sector ?? 0, characterId)
-      ).then((r) => { sSector.end(); return r; }),
-      (character.corporation_id
-        ? pgLoadCorporationInfo(
-            pg,
-            character.corporation_id,
-            character.corporation_joined_at,
-          )
-        : Promise.resolve(null)
-      ).then((r) => { sCorp.end(); return r; }),
-    ]);
+  const sMeta = sParallel.span("load_universe_meta");
+  const [
+    knowledge,
+    universeSize,
+    universeMeta,
+    sectorSnapshot,
+    corporationPayload,
+  ] = await Promise.all([
+    pgLoadMapKnowledge(pg, characterId).then((r) => { sKnowledge.end(); return r; }),
+    pgLoadUniverseSize(pg).then((r) => { sUniverse.end(); return r; }),
+    pgLoadUniverseMeta(pg).then((r) => { sMeta.end(); return r; }),
+    (options?.sectorSnapshot
+      ? Promise.resolve(options.sectorSnapshot)
+      : pgBuildSectorSnapshot(pg, ship.current_sector ?? 0, characterId)
+    ).then((r) => { sSector.end(); return r; }),
+    (character.corporation_id
+      ? pgLoadCorporationInfo(
+          pg,
+          character.corporation_id,
+          character.corporation_joined_at,
+        )
+      : Promise.resolve(null)
+    ).then((r) => { sCorp.end(); return r; }),
+  ]);
   sParallel.end();
 
+  const fedspaceSectorCount = normalizeSectorList(universeMeta.fedspace_sectors).length;
   const playerType = resolvePlayerType(character.player_metadata);
   const player = buildPlayerSnapshot(
     character,
     playerType,
     knowledge,
     universeSize,
+    fedspaceSectorCount,
   );
   const shipSnapshot = buildShipSnapshot(ship, definition);
 

@@ -46,7 +46,12 @@ from gradientbang.utils.llm_factory import (
 )
 from gradientbang.utils.local_api_server import LocalApiServer
 from gradientbang.utils.logging_config import configure_logging
-from gradientbang.utils.prompt_loader import build_voice_agent_prompt, load_prompt
+from gradientbang.utils.prompt_loader import (
+    apply_prompt_substitutions,
+    build_voice_agent_prompt,
+    load_prompt,
+    set_prompt_substitutions,
+)
 
 load_dotenv(dotenv_path=".env.bot")
 
@@ -68,6 +73,13 @@ from gradientbang.utils.weave_tracing import init_weave, traced
 # Initialize Weave early (before @traced decorators are applied to startup functions).
 # Must come after load_dotenv so WANDB_API_KEY is available.
 init_weave()
+
+# Default personality/tone used when the start payload doesn't provide one.
+# Substituted into ${personality_tone} in voice_agent.md.
+DEFAULT_PERSONALITY_TONE = (
+    "warm but dry, laconic, wry. Weathered co-pilot, not customer service. "
+    "Occasionally sarcastic but never cruel. Quiet loyalty underneath"
+)
 
 if os.getenv("BOT_USE_KRISP"):
     from pipecat.audio.filters.krisp_viva_filter import KrispVivaFilter
@@ -252,26 +264,22 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
 
     token_usage_metrics = TokenUsageMetricsProcessor(source="bot")
 
-    # System prompt
+    # System prompt. Personality/tone is injected via ${personality_tone}
+    # substitution in voice_agent.md; universe_size and fedspace_sector_count
+    # are injected later from the first status.snapshot (see handler below).
+    set_prompt_substitutions(
+        personality_tone=personality_tone or DEFAULT_PERSONALITY_TONE,
+    )
     messages = [
         {
             "role": "system",
             "content": build_voice_agent_prompt(),
         },
-    ]
-    if personality_tone:
-        messages.append(
-            {
-                "role": "system",
-                "content": f"Adopt the following personality and tone for all responses: {personality_tone}",
-            }
-        )
-    messages.append(
         {
             "role": "user",
             "content": f"<start_of_session>Character Name: {character_display_name}</start_of_session>",
         },
-    )
+    ]
 
     # Create dedicated Gemini Flash LLM for context summarization
     summarization_llm = create_llm_service(
@@ -553,6 +561,38 @@ async def run_bot(transport, runner_args: RunnerArguments, **kwargs):
         game_client=game_client,
         character_id=character_id,
         rtvi_processor=rtvi,
+    )
+
+    # ── Universe info substitution ────────────────────────────────────
+    # Register a one-shot handler for the first status.snapshot so we can
+    # substitute ${universe_size} / ${fedspace_sector_count} in the system
+    # prompt before the voice agent is activated. The local `messages` list
+    # is what gets handed to VoiceAgent via LLMAgentActivationArgs later, so
+    # we mutate it directly (the empty LLMContext at this point has no
+    # system message yet).
+    def _on_first_status_snapshot(event: dict) -> None:
+        payload = event.get("payload", event)
+        player = payload.get("player") if isinstance(payload, dict) else None
+        if not isinstance(player, dict):
+            return
+        universe_size = player.get("universe_size")
+        fedspace_sector_count = player.get("fedspace_sector_count")
+        if universe_size is None and fedspace_sector_count is None:
+            return
+        subs: dict[str, str | int] = {}
+        if universe_size is not None:
+            subs["universe_size"] = universe_size
+        if fedspace_sector_count is not None:
+            subs["fedspace_sector_count"] = fedspace_sector_count
+        set_prompt_substitutions(**subs)
+        for msg in messages:
+            if msg.get("role") == "system":
+                msg["content"] = apply_prompt_substitutions(msg["content"])
+                break
+        game_client.remove_event_handler(_universe_info_token)
+
+    _universe_info_token = game_client.add_event_handler(
+        "status.snapshot", _on_first_status_snapshot
     )
 
     event_relay = EventRelay(
