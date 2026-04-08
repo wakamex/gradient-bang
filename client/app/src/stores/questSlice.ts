@@ -79,6 +79,8 @@ export const createQuestSlice: StateCreator<QuestSlice> = (set, get) => ({
             ...quest.current_step,
             completed: true,
             current_value: quest.current_step.target_value,
+            reward_credits: quest.current_step.reward_credits ?? null,
+            reward_claimed: quest.current_step.reward_claimed ?? false,
           })
           quest.current_step_index = stepIndex + 1
           quest.current_step = nextStep ?? null
@@ -111,6 +113,8 @@ export const createQuestSlice: StateCreator<QuestSlice> = (set, get) => ({
             ...quest.current_step,
             completed: true,
             current_value: quest.current_step.target_value,
+            reward_credits: quest.current_step.reward_credits ?? null,
+            reward_claimed: quest.current_step.reward_claimed ?? false,
           })
           quest.current_step = null
         }

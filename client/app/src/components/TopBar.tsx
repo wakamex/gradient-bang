@@ -3,17 +3,26 @@ import { FilmStripIcon, MedalIcon, SlidersHorizontalIcon } from "@phosphor-icons
 import { TopBarCreditBalance } from "@/components/TopBarCreditBalance"
 import { TopBarDisconnectButton } from "@/components/TopBarDisconnectButton"
 import useGameStore from "@/stores/game"
+import { cn } from "@/utils/tailwind"
 
 import { CharacterBadge } from "./CharacterBadge"
 import { Button } from "./primitives/Button"
 import { DotDivider } from "./primitives/DotDivider"
 import { Tooltip, TooltipContent, TooltipTrigger } from "./primitives/ToolTip"
 
-export const TopBarTextItem = ({ label, value }: { label: string; value: string | undefined }) => {
+export const TopBarTextItem = ({
+  label,
+  value,
+  className,
+}: {
+  label?: string
+  value: string | undefined
+  className?: string
+}) => {
   return (
-    <div className="flex flex-row gap-1.5 text-xs uppercase ">
-      <span className="text-subtle-foreground truncate">{label}</span>{" "}
-      <span className="text-white font-semibold truncate">{value ?? "---"}</span>
+    <div className={cn("flex flex-row gap-1.5 text-xs uppercase min-w-0", className)}>
+      {label && <span className="text-subtle-foreground truncate">{label + " "}</span>}
+      <span className="text-white font-semibold truncate min-w-0">{value ?? "---"}</span>
     </div>
   )
 }
@@ -24,20 +33,17 @@ export const TopBar = () => {
   const enableCapture = useGameStore((s) => s.settings.enableCapture)
 
   return (
-    <header className="relative bg-subtle-background border-b flex flex-row items-center shadow-long z-50">
-      <div className="text-xs uppercase p-1.5">
-        <CharacterBadge />
-      </div>
-      <div className="flex-1" />
-      <TopBarCreditBalance />
-      {corporation && (
-        <div className="flex flex-row gap-3 text-sm items-center">
-          <DotDivider />
-          <TopBarTextItem label="Corp" value={corporation.name} />
+    <header className="relative bg-subtle-background border-b flex flex-row items-center gap-ui-sm shadow-long z-50">
+      <div className="flex-1 min-w-0 text-xs uppercase p-1.5 flex flex-row items-center gap-3">
+        <div className="shrink-0">
+          <CharacterBadge />
         </div>
-      )}
-      <div className="flex-1" />
-      <div className="flex flex-row gap-1.5 p-1.5 items-center">
+        {corporation && <TopBarTextItem value={corporation.name} />}
+      </div>
+      <div className="relative h-full shrink-0 w-56">
+        <TopBarCreditBalance />
+      </div>
+      <div className="flex-1 flex flex-row justify-end gap-1.5 p-1.5 items-center">
         {enableCapture && (
           <Tooltip>
             <TooltipTrigger asChild>
